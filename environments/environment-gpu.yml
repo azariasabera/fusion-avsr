@@ -1,0 +1,36 @@
+name: fusion-avsr-gpu
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pytorch-gpu
+  - torchvision
+  - torchaudio
+  - cuda-version=12.6
+  - transformers
+  - datasets
+  - huggingface_hub
+  - torchmetrics
+  - tensorboard
+  - einops
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - tqdm
+  - pyyaml
+  - librosa
+  - ipykernel
+  - pysoundfile
+  - opencv
+  - scikit-image
+  - ffmpeg
+  - av
+  - sentencepiece
+  - pytorch-lightning    # needed to load auto-AVSR's model classes/checkpoint
+  - pip
+  - pip:
+      - jiwer            # WER/CER metric
+      - kagglehub
+      - wandb            # optional
+      - mediapipe

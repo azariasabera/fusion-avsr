@@ -1,0 +1,6 @@
+[submodule "external/auto_avsr"]
+	path = external/auto_avsr
+	url = https://github.com/mpc001/auto_avsr.git
+[submodule "external/vsr_multilang"]
+	path = external/vsr_multilang
+	url = https://github.com/mpc001/Visual_Speech_Recognition_for_Multiple_Languages.git
