@@ -1,0 +1,35 @@
+name: fusion-avsr-cpu
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pytorch-cpu
+  - torchvision
+  - torchaudio
+  - transformers
+  - datasets
+  - huggingface_hub
+  - torchmetrics
+  - tensorboard
+  - einops
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - tqdm
+  - pyyaml
+  - librosa
+  - ipykernel
+  - pysoundfile
+  - opencv
+  - scikit-image
+  - ffmpeg
+  - av
+  - sentencepiece
+  - pytorch-lightning
+  - pip
+  - pip:
+      - jiwer
+      - kagglehub
+      - wandb
+      - mediapipe
