@@ -133,6 +133,17 @@ def test_build_grid_word_segments_frame_conversion_and_sample_id(tmp_path):
     assert row["end_frame"] == 50
 
 
+def test_build_grid_word_segments_limit_caps_number_of_clips(tmp_path):
+    grid_root = tmp_path / "grid"
+    _write_grid_align(grid_root / "s1_processed" / "align" / "clip1.align", [(0, 25000, "bin")])
+    _write_grid_align(grid_root / "s1_processed" / "align" / "clip2.align", [(0, 25000, "lay")])
+
+    word_segments = build_grid_word_segments(grid_root, limit=1)
+
+    assert len(word_segments) == 1
+    assert word_segments.iloc[0]["sample_id"] == "s1_clip1"
+
+
 def test_build_grid_word_segments_writes_csv_when_requested(tmp_path):
     grid_root = tmp_path / "grid"
     _write_grid_align(grid_root / "s1_processed" / "align" / "clip1.align", [
@@ -175,6 +186,23 @@ def test_build_grid_manifest_one_clip(tmp_path):
     assert row["transcript"] == "bin blue"  # sil excluded
     assert row["duration_sec"] == pytest.approx(3.0, abs=0.01)
     assert row["landmark_path"] == str(landmarks_root / "s1_processed" / "bbaf2n.pkl")
+
+
+def test_build_grid_manifest_limit_caps_number_of_clips(tmp_path):
+    grid_root = tmp_path / "grid"
+    landmarks_root = tmp_path / "grid_landmarks"
+    audio_output_dir = tmp_path / "audio"
+
+    for speaker, clip in [("s1_processed", "clip1"), ("s1_processed", "clip2")]:
+        speaker_dir = grid_root / speaker
+        speaker_dir.mkdir(parents=True, exist_ok=True)
+        (speaker_dir / f"{clip}.mpg").write_bytes(b"")
+        _write_grid_align(speaker_dir / "align" / f"{clip}.align", [(0, 25000, "bin")])
+        _write_silence_wav(audio_output_dir / f"s1_{clip}.wav", duration_sec=1.0)
+
+    manifest = build_grid_manifest(grid_root, landmarks_root, audio_output_dir, limit=1)
+
+    assert len(manifest) == 1
 
 
 def test_build_grid_manifest_raises_if_audio_not_extracted(tmp_path):

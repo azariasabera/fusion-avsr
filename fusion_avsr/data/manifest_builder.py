@@ -185,6 +185,7 @@ def build_lrs3_trainval_manifest(
     lrs3_root: PathLike,
     audio_output_dir: PathLike,
     output_csv: Optional[PathLike] = None,
+    limit: Optional[int] = None,
 ) -> pd.DataFrame:
     """Build the per-clip manifest for the LRS3-trainval split.
 
@@ -204,6 +205,10 @@ def build_lrs3_trainval_manifest(
             expected at ``<audio_output_dir>/<video_id>_<clip_id>.wav``.
         output_csv: If given, the resulting manifest is also written to
             this path as a CSV file.
+        limit: If given, stop after this many clips (in sorted
+            video_id/clip_id order), instead of walking the entire
+            split. Useful for a quick smoke test against a handful of
+            real clips before committing to a full run over all ~32,000.
 
     Returns:
         A DataFrame with the columns listed in ``MANIFEST_COLUMNS``, one
@@ -214,11 +219,15 @@ def build_lrs3_trainval_manifest(
     video_root = lrs3_root / "ainncy" / "trainval"
     landmarks_root = lrs3_root / "landmarks" / "LRS3_landmarks" / "trainval"
 
-    logger.info("Building LRS3-trainval manifest from %s", video_root)
+    logger.info("Building LRS3-trainval manifest from %s (limit=%s)", video_root, limit)
     rows = []
     for video_dir in sorted(p for p in video_root.iterdir() if p.is_dir()):
+        if limit is not None and len(rows) >= limit:
+            break
         video_id = video_dir.name
         for mp4_path in sorted(video_dir.glob("*.mp4")):
+            if limit is not None and len(rows) >= limit:
+                break
             clip_id = mp4_path.stem
             txt_path = video_dir / f"{clip_id}.txt"
             landmark_path = landmarks_root / video_id / f"{clip_id}.pkl"
@@ -247,6 +256,7 @@ def build_lrs3_test_mattymchen_manifest(
     audio_output_dir: PathLike,
     output_csv: Optional[PathLike] = None,
     split: str = "train",
+    limit: Optional[int] = None,
 ) -> pd.DataFrame:
     """Build the per-clip manifest for the LRS3-test-mattymchen test set.
 
@@ -280,6 +290,10 @@ def build_lrs3_test_mattymchen_manifest(
             directory of parquet files with no explicit split naming
             convention). If ``split`` is not present in the loaded
             dataset, the first available split is used instead.
+        limit: If given, only the first ``limit`` rows of the dataset are
+            processed, instead of the whole split. Useful for a quick
+            smoke test against a handful of real examples before
+            committing to a full run over all ~1,321 examples.
 
     Returns:
         A DataFrame with the columns listed in ``MANIFEST_COLUMNS``, one
@@ -292,9 +306,11 @@ def build_lrs3_test_mattymchen_manifest(
     parquet_data_dir = Path(parquet_data_dir)
     audio_output_dir = Path(audio_output_dir)
 
-    logger.info("Building LRS3-test-mattymchen manifest from %s", parquet_data_dir)
+    logger.info("Building LRS3-test-mattymchen manifest from %s (limit=%s)", parquet_data_dir, limit)
     dataset_dict = load_dataset("parquet", data_dir=str(parquet_data_dir))
     dataset = dataset_dict[split] if split in dataset_dict else next(iter(dataset_dict.values()))
+    if limit is not None:
+        dataset = dataset.select(range(min(limit, len(dataset))))
 
     rows = []
     for example in dataset:
@@ -325,6 +341,7 @@ def build_grid_manifest(
     landmarks_root: PathLike,
     audio_output_dir: PathLike,
     output_csv: Optional[PathLike] = None,
+    limit: Optional[int] = None,
 ) -> pd.DataFrame:
     """Build the per-clip manifest for GRID.
 
@@ -362,6 +379,10 @@ def build_grid_manifest(
             expected at ``<audio_output_dir>/<speaker>_<clip>.wav``.
         output_csv: If given, the resulting manifest is also written to
             this path as a CSV file.
+        limit: If given, stop after this many clips (in sorted
+            speaker/clip order), instead of walking all 33 speakers.
+            Useful for a quick smoke test against a handful of real
+            clips before committing to a full run over all ~33,000.
 
     Returns:
         A DataFrame with the columns listed in ``MANIFEST_COLUMNS``, one
@@ -371,13 +392,17 @@ def build_grid_manifest(
     landmarks_root = Path(landmarks_root)
     audio_output_dir = Path(audio_output_dir)
 
-    logger.info("Building GRID manifest from %s", grid_root)
+    logger.info("Building GRID manifest from %s (limit=%s)", grid_root, limit)
     rows = []
     for speaker_dir in sorted(p for p in grid_root.iterdir() if p.is_dir()):
+        if limit is not None and len(rows) >= limit:
+            break
         speaker = speaker_dir.name.replace("_processed", "")
         align_dir = speaker_dir / "align"
 
         for mpg_path in sorted(speaker_dir.glob("*.mpg")):
+            if limit is not None and len(rows) >= limit:
+                break
             clip_id = mpg_path.stem
             align_path = align_dir / f"{clip_id}.align"
             landmark_path = landmarks_root / speaker_dir.name / f"{clip_id}.pkl"
@@ -408,6 +433,7 @@ def build_grid_manifest(
 def build_grid_word_segments(
     grid_root: PathLike,
     output_csv: Optional[PathLike] = None,
+    limit: Optional[int] = None,
 ) -> pd.DataFrame:
     """Build the word-level segment table used by the word-recognition pretext task.
 
@@ -435,6 +461,12 @@ def build_grid_word_segments(
         output_csv: If given, the resulting table is also written to this
             path as a CSV file (conventionally
             ``manifests/grid_word_segments.csv``).
+        limit: If given, stop after this many CLIPS (i.e. ``.align``
+            files, in sorted speaker/clip order) have been processed --
+            note this bounds the number of source clips, not the number
+            of output word-segment rows, since one clip produces several
+            words. Useful for a quick smoke test before committing to a
+            full run over all 33,000 clips.
 
     Returns:
         A DataFrame with columns ``sample_id``, ``word``, ``start_frame``,
@@ -445,15 +477,21 @@ def build_grid_word_segments(
     """
     grid_root = Path(grid_root)
 
-    logger.info("Building GRID word-segment table from %s", grid_root)
+    logger.info("Building GRID word-segment table from %s (limit=%s)", grid_root, limit)
     rows = []
+    num_clips_processed = 0
     for speaker_dir in sorted(p for p in grid_root.iterdir() if p.is_dir()):
+        if limit is not None and num_clips_processed >= limit:
+            break
         speaker = speaker_dir.name.replace("_processed", "")
         align_dir = speaker_dir / "align"
 
         for align_path in sorted(align_dir.glob("*.align")):
+            if limit is not None and num_clips_processed >= limit:
+                break
             clip_id = align_path.stem
             sample_id = f"{speaker}_{clip_id}"
+            num_clips_processed += 1
 
             for start_units, end_units, word in _parse_grid_align(align_path):
                 if word in GRID_NON_WORD_TOKENS:
