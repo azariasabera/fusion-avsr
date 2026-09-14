@@ -48,6 +48,7 @@ NOISE_CATEGORIES = ("white", "babble", "music", "noise")
 
 # Default category excluded from training by NoiseMixer.available_categories().
 DEFAULT_HELD_OUT_CATEGORY = "noise"
+DEFAULT_SEED = 42
 
 # Relative sub-paths, within a MUSAN root directory, that back each
 # MUSAN-sourced category. "white" is absent here on purpose: it is
@@ -234,7 +235,7 @@ class NoiseMixer:
         musan_root: PathLike,
         sample_rate: int = 16000,
         held_out_category: Optional[str] = DEFAULT_HELD_OUT_CATEGORY,
-        seed: Optional[int] = None,
+        seed: Optional[int] = DEFAULT_SEED,
     ) -> None:
         """Initialize a ``NoiseMixer``.
 
@@ -253,8 +254,8 @@ class NoiseMixer:
                 Defaults to ``"noise"``. Pass ``None`` to disable
                 held-out behavior entirely (all four categories
                 available for training).
-            seed: Optional random seed, for reproducible noise selection
-                and mixing.
+            seed: Random seed, for consistent noise selection and
+                mixing. Defaults to ``DEFAULT_SEED`` (42).
         """
         self.musan_root = Path(musan_root)
         self.sample_rate = sample_rate
