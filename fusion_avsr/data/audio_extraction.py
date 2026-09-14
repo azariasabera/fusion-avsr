@@ -35,6 +35,10 @@ from typing import Sequence, Union
 import numpy as np
 import soundfile as sf
 
+from fusion_avsr.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
 PathLike = Union[str, Path]
 
 # The whole project standardizes on 16kHz mono audio: it is what the
@@ -73,10 +77,21 @@ def get_extracted_wav_path(output_dir: PathLike, sample_id: str) -> Path:
     """
     wav_path = Path(output_dir) / f"{sample_id}.wav"
     if not wav_path.exists():
-        raise FileNotFoundError(
+        message = (
             f"Expected extracted audio at {wav_path}, but it does not exist. "
             f"Run scripts/extract_audio.sh first to extract GRID/LRS3-trainval audio."
         )
+        logger.error(message)
+        raise FileNotFoundError(message)
+
+    actual_sample_rate = sf.info(str(wav_path)).samplerate
+    if actual_sample_rate != DEFAULT_SAMPLE_RATE:
+        logger.warning(
+            "%s is at %dHz, expected %dHz -- scripts/extract_audio.sh should "
+            "have resampled it; check that script's -ar argument.",
+            wav_path, actual_sample_rate, DEFAULT_SAMPLE_RATE,
+        )
+
     return wav_path
 
 
@@ -111,6 +126,10 @@ def extract_wav_from_pcm(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     samples = np.asarray(pcm_samples, dtype=np.int16)
+    logger.debug(
+        "Writing %d PCM samples (%.2fs at %dHz) to %s",
+        len(samples), len(samples) / sample_rate, sample_rate, output_path,
+    )
     sf.write(str(output_path), samples, sample_rate, subtype="PCM_16")
 
     return output_path

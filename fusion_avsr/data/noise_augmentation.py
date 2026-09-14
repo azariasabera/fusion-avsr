@@ -26,10 +26,15 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Set, Union
 
+import librosa
 import numpy as np
 import soundfile as sf
+
+from fusion_avsr.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 PathLike = Union[str, Path]
 
@@ -82,11 +87,72 @@ def _list_musan_wavs(musan_root: PathLike, category: str) -> List[Path]:
     return sorted(category_root.rglob("*.wav"))
 
 
-def _load_audio(wav_path: PathLike) -> np.ndarray:
-    """Load a ``.wav`` file as a 1-D float32 array, downmixed to mono if needed."""
-    audio, _sample_rate = sf.read(str(wav_path), dtype="float32", always_2d=False)
+# Paths we've already logged a resample warning for, so a noise file
+# reused many times over a training run only logs once, not on every
+# mix() call.
+_resample_logged: Set[str] = set()
+
+
+def _resample_if_needed(
+    audio: np.ndarray,
+    sample_rate: int,
+    target_sample_rate: int,
+    wav_path: PathLike,
+) -> np.ndarray:
+    """Resample ``audio`` to ``target_sample_rate`` if it doesn't already match.
+
+    MUSAN's official release is uniformly 16kHz, so this should rarely
+    actually resample anything in practice -- it exists as a safety net
+    for a mislabeled/corrupted file, not as an expected code path. Logs
+    a warning once per distinct file path the first time a mismatch is
+    seen, so a frequently-reused noise file doesn't spam the log across
+    a whole training run.
+
+    Args:
+        audio: 1-D audio array, at ``sample_rate``.
+        sample_rate: The audio's actual sample rate, as read from its
+            file header.
+        target_sample_rate: The sample rate every other signal in the
+            mix (the clean audio) is at -- what ``audio`` needs to
+            match.
+        wav_path: Source path, used only for the log message.
+
+    Returns:
+        ``audio`` unchanged if ``sample_rate == target_sample_rate``,
+        otherwise a resampled 1-D array at ``target_sample_rate``.
+    """
+    if sample_rate == target_sample_rate:
+        return audio
+
+    wav_path_str = str(wav_path)
+    if wav_path_str not in _resample_logged:
+        logger.warning(
+            "Resampling %s from %dHz to %dHz (expected MUSAN files to already "
+            "be 16kHz -- this one wasn't, resampling automatically).",
+            wav_path_str, sample_rate, target_sample_rate,
+        )
+        _resample_logged.add(wav_path_str)
+
+    return librosa.resample(y=audio, orig_sr=sample_rate, target_sr=target_sample_rate)
+
+
+def _load_audio(wav_path: PathLike, target_sample_rate: int) -> np.ndarray:
+    """Load a ``.wav`` file as a 1-D float32 array, downmixed to mono, resampled if needed.
+
+    Args:
+        wav_path: Path to the ``.wav`` file to load.
+        target_sample_rate: Sample rate the returned audio must be at.
+            If the file's actual sample rate differs, it is resampled
+            (with a one-time warning logged, see
+            ``_resample_if_needed``).
+
+    Returns:
+        A 1-D float32 array, at ``target_sample_rate``.
+    """
+    audio, sample_rate = sf.read(str(wav_path), dtype="float32", always_2d=False)
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
+    audio = _resample_if_needed(audio, sample_rate, target_sample_rate, wav_path)
     return audio
 
 
@@ -199,6 +265,13 @@ class NoiseMixer:
             category: _list_musan_wavs(self.musan_root, category)
             for category in _MUSAN_CATEGORY_SUBDIRS
         }
+        for category, wavs in self._wavs_by_category.items():
+            logger.info("Found %d MUSAN .wav files for category '%s'", len(wavs), category)
+            if len(wavs) == 0:
+                logger.warning(
+                    "No MUSAN .wav files found for category '%s' under %s -- "
+                    "mixing with this category will fail.", category, self.musan_root,
+                )
 
     def available_categories(self, include_held_out: bool = False) -> List[str]:
         """List the noise categories available for use.
@@ -253,13 +326,16 @@ class NoiseMixer:
         if category == "babble":
             speech_wavs = self._wavs_by_category["babble"]
             chosen = self._rng.sample(speech_wavs, k=min(BABBLE_NUM_SPEAKERS, len(speech_wavs)))
-            speakers = [_fit_length(_load_audio(p), length, self._rng) for p in chosen]
+            speakers = [
+                _fit_length(_load_audio(p, self.sample_rate), length, self._rng)
+                for p in chosen
+            ]
             return np.sum(speakers, axis=0).astype(np.float32)
 
         # "music" and "noise" categories: a single randomly-chosen MUSAN file.
         candidates = self._wavs_by_category[category]
         chosen_path = self._rng.choice(candidates)
-        return _fit_length(_load_audio(chosen_path), length, self._rng)
+        return _fit_length(_load_audio(chosen_path, self.sample_rate), length, self._rng)
 
     def mix(
         self,
