@@ -1,0 +1,50 @@
+# Hydra config for scripts/extract_landmarks_grid.py.
+#
+# grid_root and landmarks_root have no sensible default (they are
+# machine-specific paths, e.g. under /scratch/... on Roihu) and MUST be
+# set on the command line, e.g.:
+#
+#   python scripts/extract_landmarks_grid.py \
+#       grid_root=/scratch/project_2020712/datasets/kaggle_lipnet/.../data \
+#       landmarks_root=/scratch/project_2020712/datasets/grid_landmarks
+
+defaults:
+  - _self_
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+# Path to the GRID dataset root, containing one s<N>_processed/ folder per
+# speaker (each holding that speaker's .mpg clips and an align/ subfolder
+# of .align files).
+grid_root: null
+
+# Root directory to write landmark .pkl files into. Mirrors grid_root's
+# own s<N>_processed/<clip> layout, e.g. a clip at
+# <grid_root>/s1_processed/bbaf2n.mpg produces
+# <landmarks_root>/s1_processed/bbaf2n.pkl.
+landmarks_root: null
+
+# Device string passed to the RetinaFace face detector and FAN landmark
+# predictor (e.g. "cuda:0" or "cpu"). RetinaFace over ~33,000 GRID clips
+# is slow on CPU -- run this script under a GPU allocation/environment,
+# unlike the rest of data-preprocessing's CPU-only work.
+device: cuda:0
+
+# RetinaFace backbone model name, passed through to
+# RetinaFacePredictor.get_model(model_name).
+model_name: resnet50
+
+# If false (default), clips that already have a landmark .pkl file at the
+# expected output path are skipped -- lets a large batch job be safely
+# resumed after an interruption. If true, every clip is reprocessed.
+overwrite: false
+
+# If set, only the first `limit` clips (in sorted speaker/clip order) are
+# processed. Useful for a quick smoke test before committing to a full
+# ~33,000-clip run.
+limit: null
