@@ -27,15 +27,18 @@ word-recognition pretext task trains on individual word segments sliced
 out of each GRID clip, not on whole clips. See that function's docstring
 for the exact schema.
 
-This module also provides two reusable consistency-check functions
-(``check_file_existence`` and ``check_frame_count_vs_duration``) that can
-be re-run against any manifest to catch missing files or mismatched
-frame counts, rather than checked by hand.
+This module also provides three reusable consistency-check functions
+(``check_file_existence``, ``check_frame_count_vs_duration``, and
+``check_video_fps``) that can be re-run against any manifest to catch
+missing files, mismatched landmark frame counts, or a video's real frame
+rate not actually matching the assumed 25fps -- rather than checked by
+hand.
 """
 
 from __future__ import annotations
 
 import pickle
+import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
@@ -46,6 +49,9 @@ from fusion_avsr.data.audio_extraction import (
     get_extracted_wav_path,
     get_wav_duration_sec,
 )
+from fusion_avsr.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 PathLike = Union[str, Path]
 
@@ -114,7 +120,10 @@ def _parse_lrs3_transcript(txt_path: PathLike) -> str:
             if line.startswith("Text:"):
                 text = line[len("Text:"):].strip()
                 return text.lower()
-    raise ValueError(f"No 'Text:' line found in transcript file: {txt_path}")
+
+    message = f"No 'Text:' line found in transcript file: {txt_path}"
+    logger.error(message)
+    raise ValueError(message)
 
 
 def _parse_grid_align(align_path: PathLike) -> List[Tuple[int, int, str]]:
@@ -205,6 +214,7 @@ def build_lrs3_trainval_manifest(
     video_root = lrs3_root / "ainncy" / "trainval"
     landmarks_root = lrs3_root / "landmarks" / "LRS3_landmarks" / "trainval"
 
+    logger.info("Building LRS3-trainval manifest from %s", video_root)
     rows = []
     for video_dir in sorted(p for p in video_root.iterdir() if p.is_dir()):
         video_id = video_dir.name
@@ -227,6 +237,7 @@ def build_lrs3_trainval_manifest(
             })
 
     manifest = pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
+    logger.info("Built LRS3-trainval manifest: %d clips", len(manifest))
     _maybe_write_csv(manifest, output_csv)
     return manifest
 
@@ -281,6 +292,7 @@ def build_lrs3_test_mattymchen_manifest(
     parquet_data_dir = Path(parquet_data_dir)
     audio_output_dir = Path(audio_output_dir)
 
+    logger.info("Building LRS3-test-mattymchen manifest from %s", parquet_data_dir)
     dataset_dict = load_dataset("parquet", data_dir=str(parquet_data_dir))
     dataset = dataset_dict[split] if split in dataset_dict else next(iter(dataset_dict.values()))
 
@@ -303,6 +315,7 @@ def build_lrs3_test_mattymchen_manifest(
         })
 
     manifest = pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
+    logger.info("Built LRS3-test-mattymchen manifest: %d clips", len(manifest))
     _maybe_write_csv(manifest, output_csv)
     return manifest
 
@@ -358,6 +371,7 @@ def build_grid_manifest(
     landmarks_root = Path(landmarks_root)
     audio_output_dir = Path(audio_output_dir)
 
+    logger.info("Building GRID manifest from %s", grid_root)
     rows = []
     for speaker_dir in sorted(p for p in grid_root.iterdir() if p.is_dir()):
         speaker = speaker_dir.name.replace("_processed", "")
@@ -386,6 +400,7 @@ def build_grid_manifest(
             })
 
     manifest = pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
+    logger.info("Built GRID manifest: %d clips", len(manifest))
     _maybe_write_csv(manifest, output_csv)
     return manifest
 
@@ -430,6 +445,7 @@ def build_grid_word_segments(
     """
     grid_root = Path(grid_root)
 
+    logger.info("Building GRID word-segment table from %s", grid_root)
     rows = []
     for speaker_dir in sorted(p for p in grid_root.iterdir() if p.is_dir()):
         speaker = speaker_dir.name.replace("_processed", "")
@@ -450,6 +466,7 @@ def build_grid_word_segments(
                 })
 
     word_segments = pd.DataFrame(rows, columns=WORD_SEGMENT_COLUMNS)
+    logger.info("Built GRID word-segment table: %d word segments", len(word_segments))
     _maybe_write_csv(word_segments, output_csv)
     return word_segments
 
@@ -488,6 +505,12 @@ def check_file_existence(
                     "column": column,
                     "path": path_value,
                 })
+
+    if problems:
+        logger.warning("check_file_existence found %d missing path(s)", len(problems))
+    else:
+        logger.info("check_file_existence: all referenced paths exist")
+
     return pd.DataFrame(problems, columns=["sample_id", "column", "path"])
 
 
@@ -539,7 +562,99 @@ def check_frame_count_vs_duration(
                 "diff": diff,
             })
 
+    if problems:
+        logger.warning("check_frame_count_vs_duration found %d mismatched clip(s)", len(problems))
+    else:
+        logger.info("check_frame_count_vs_duration: all landmark frame counts match")
+
     return pd.DataFrame(
         problems,
         columns=["sample_id", "landmark_path", "expected_frames", "actual_frames", "diff"],
     )
+
+
+def _probe_video_fps(video_path: PathLike) -> float:
+    """Read a video file's frame rate via ffprobe.
+
+    Reads only the container's stream metadata (the ``r_frame_rate``
+    field), not the actual video frames, so this is cheap to run across
+    an entire manifest even though it shells out to a subprocess per
+    clip.
+
+    Args:
+        video_path: Path to a video file.
+
+    Returns:
+        The video's frame rate, in frames per second, as a float.
+
+    Raises:
+        subprocess.CalledProcessError: If ffprobe exits with a non-zero
+            return code (e.g. the file is corrupt/unreadable).
+    """
+    command = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=r_frame_rate",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+    ]
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+
+    # ffprobe reports r_frame_rate as a "<numerator>/<denominator>"
+    # fraction string, e.g. "25/1" or "30000/1001".
+    numerator, denominator = result.stdout.strip().split("/")
+    return float(numerator) / float(denominator)
+
+
+def check_video_fps(
+    manifest: pd.DataFrame,
+    expected_fps: int = VIDEO_FPS,
+    tolerance: float = 0.5,
+) -> pd.DataFrame:
+    """Check that every referenced video file's actual frame rate matches the assumed fps.
+
+    ``VIDEO_FPS`` (25fps) is assumed throughout this module (e.g. for the
+    GRID ``.align`` timestamp-to-frame conversion, and as the default for
+    ``check_frame_count_vs_duration``), but never directly verified
+    against the real video files it's applied to. This function closes
+    that gap: for every row with a non-empty ``video_path``, it reads the
+    file's actual frame rate via ffprobe and flags any clip whose real
+    fps doesn't match ``expected_fps``.
+
+    Args:
+        manifest: A manifest DataFrame produced by one of the
+            ``build_*_manifest`` functions.
+        expected_fps: The frame rate every clip is assumed to be at.
+            Defaults to ``VIDEO_FPS`` (25fps).
+        tolerance: Maximum allowed absolute difference, in fps, between
+            the expected and actual frame rate before a row is flagged
+            as a problem. Defaults to 0.5, to allow for ordinary
+            floating-point rounding in the reported frame rate.
+
+    Returns:
+        A DataFrame of problems found, with columns ``sample_id``,
+        ``video_path``, ``expected_fps``, ``actual_fps``. Empty (zero
+        rows) if every clip's frame rate matches within tolerance.
+    """
+    problems = []
+    for _, row in manifest.iterrows():
+        video_path = row["video_path"]
+        if video_path is None or video_path == "":
+            continue
+
+        actual_fps = _probe_video_fps(video_path)
+        if abs(actual_fps - expected_fps) > tolerance:
+            problems.append({
+                "sample_id": row["sample_id"],
+                "video_path": video_path,
+                "expected_fps": expected_fps,
+                "actual_fps": actual_fps,
+            })
+
+    if problems:
+        logger.warning("check_video_fps found %d clip(s) with unexpected frame rate", len(problems))
+    else:
+        logger.info("check_video_fps: all video frame rates match")
+
+    return pd.DataFrame(problems, columns=["sample_id", "video_path", "expected_fps", "actual_fps"])
