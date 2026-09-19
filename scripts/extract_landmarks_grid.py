@@ -50,6 +50,50 @@ if str(_REPO_ROOT) not in sys.path:
 
 from fusion_avsr.utils.logging import get_logger  # noqa: E402
 
+import torch
+import torchvision.io
+
+
+def _read_video_via_torchcodec(
+    filename: str | Path,
+    pts_unit: str = "sec",
+    **kwargs: object,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, object]]:
+    """Decode a video with TorchCodec using torchvision's return contract.
+
+    This compatibility shim is used by ``LandmarksDetector``.
+
+    Args:
+        filename: Path to the video file to decode.
+        pts_unit: Timestamp unit accepted by the torchvision API. It is kept
+            for API compatibility and is not used by TorchCodec here.
+        **kwargs: Additional torchvision arguments accepted for compatibility.
+
+    Returns:
+        A tuple containing video frames in ``(T, H, W, C)`` layout, an empty
+        audio tensor, and an empty metadata dictionary.
+
+    Raises:
+        RuntimeError: If no video frames can be decoded.
+    """
+    from torchcodec.decoders import VideoDecoder
+
+    decoder = VideoDecoder(filename, dimension_order="NHWC")
+    frames: list[torch.Tensor] = []
+    for frame_index in range(len(decoder)):
+        try:
+            frames.append(decoder[frame_index])
+        except RuntimeError:
+            break
+
+    if not frames:
+        raise RuntimeError(f"Could not decode any frames from {filename}")
+
+    video_frames = torch.stack(frames)
+    return video_frames, torch.empty(0), {}
+
+torchvision.io.read_video = _read_video_via_torchcodec
+
 logger = get_logger(__name__)
 
 
@@ -107,6 +151,7 @@ def extract_landmarks_for_grid(
 
     output_paths = []
     num_skipped = 0
+    num_failed = 0
     for mpg_path in tqdm(mpg_paths, desc="Extracting GRID landmarks"):
         speaker_dir_name = mpg_path.parent.name
         clip_id = mpg_path.stem
@@ -117,7 +162,14 @@ def extract_landmarks_for_grid(
             num_skipped += 1
             continue
 
-        landmarks = landmarks_detector(str(mpg_path))
+        try:
+            landmarks = landmarks_detector(str(mpg_path))
+        except Exception as e:
+            logger.error("Failed on %s: %s", mpg_path, e)
+            with open(landmarks_root / "landmark_errors.log", "a") as f:
+                f.write(f"{mpg_path}: {e}\n")
+            num_failed += 1
+            continue
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "wb") as f:
