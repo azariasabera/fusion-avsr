@@ -322,6 +322,20 @@ def test_check_frame_count_vs_duration_flags_mismatch(tmp_path):
     assert problems.iloc[0]["actual_frames"] == 10
 
 
+def test_check_frame_count_vs_duration_skips_missing_landmark(tmp_path):
+    manifest = pd.DataFrame([
+        {
+            "sample_id": "missing",
+            "landmark_path": str(tmp_path / "missing.pkl"),
+            "duration_sec": 2.0,
+        },
+    ])
+
+    problems = check_frame_count_vs_duration(manifest)
+
+    assert problems.empty
+
+
 # ---------------------------------------------------------------------------
 # check_video_fps
 # ---------------------------------------------------------------------------
