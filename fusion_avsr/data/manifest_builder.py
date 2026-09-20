@@ -678,3 +678,68 @@ def check_video_fps(
         logger.info("check_video_fps: all video frame rates match")
 
     return pd.DataFrame(problems, columns=["sample_id", "video_path", "expected_fps", "actual_fps"])
+
+
+def clean_manifest(
+    manifest: pd.DataFrame,
+    tolerance_frames: int = 3,
+    log_path: Optional[PathLike] = None,
+) -> pd.DataFrame:
+    """Drop manifest rows with missing files or anomalous frame counts.
+
+    Does two independent checks: missing files (corrupted source videos, like
+    GRID's ``s8_processed``) and frame-count differences beyond the requested
+    tolerance. Rows without a landmark path, such as LRS3-test-mattymchen
+    rows, are skipped by the frame-count check.
+
+    Args:
+        manifest: A manifest DataFrame produced by one of the manifest
+            builders. It must contain ``sample_id``, the path columns used by
+            ``check_file_existence``, and ``landmark_path``/``duration_sec``
+            for frame-count validation.
+        tolerance_frames: Maximum allowed absolute difference between the
+            landmark frame count and the expected count before a row is
+            dropped. Defaults to 3 frames.
+        log_path: Optional path to an append-only log file. Dropped sample
+            IDs are written here for traceability.
+
+    Returns:
+        A copy of ``manifest`` containing only rows that pass both checks,
+        with the index reset. The input DataFrame is not modified.
+    """
+    existence_problems = check_file_existence(manifest)
+    frame_problems = check_frame_count_vs_duration(manifest, tolerance_frames=tolerance_frames)
+    bad_ids = set(existence_problems["sample_id"]) | set(frame_problems["sample_id"])
+
+    if bad_ids and log_path is not None:
+        with open(log_path, "a") as f:
+            for sid in sorted(bad_ids):
+                f.write(f"{sid}: dropped\n")
+
+    cleaned = manifest[~manifest["sample_id"].isin(bad_ids)].reset_index(drop=True)
+    logger.info("Cleaned manifest: %d -> %d rows (%d dropped)", len(manifest), len(cleaned), len(bad_ids))
+    return cleaned
+
+def filter_grid_word_segments(
+    word_segments: pd.DataFrame,
+    manifest: pd.DataFrame,
+) -> pd.DataFrame:
+    """Keep word segments whose parent clips are present in a manifest.
+
+    This performs a semi-join on ``sample_id``. It does not check files or
+    frame counts itself, so pass the result of ``clean_manifest`` when
+    dropped clips must also be removed from the word-segment table.
+
+    Args:
+        word_segments: GRID word-segment table produced by
+            ``build_grid_word_segments``. It must contain a ``sample_id`` column.
+        manifest: Manifest whose ``sample_id`` values define the clips to
+            keep. This should normally be a cleaned GRID manifest.
+
+    Returns:
+        A copy of ``word_segments`` containing only rows whose ``sample_id``
+        occurs in ``manifest``, with the index reset. The input DataFrames
+        are not modified.
+    """
+    valid_ids = set(manifest["sample_id"])
+    return word_segments[word_segments["sample_id"].isin(valid_ids)].reset_index(drop=True)
