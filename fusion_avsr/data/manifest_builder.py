@@ -79,6 +79,13 @@ MANIFEST_COLUMNS = [
     "source",
 ]
 
+# Placeholder landmark paths for LRS3-test clips that cannot be matched to a
+# video_id/clip_id although a mapping CSV was supplied. They point at no real
+# file on purpose, so ``clean_manifest`` drops those rows (and the reason is
+# visible in the dropped-rows log).
+LANDMARK_MARKER_AMBIGUOUS = "AMBIGUOUS_MAPPING"
+LANDMARK_MARKER_NOT_FOUND = "NOT_IN_MAPPING"
+
 # Columns of the GRID word-segment table (see build_grid_word_segments).
 WORD_SEGMENT_COLUMNS = ["sample_id", "word", "start_frame", "end_frame"]
 
@@ -322,11 +329,16 @@ def build_lrs3_test_manifest(
     multiple samples. The number of frames disambiguates most of them, 
     but 6 cases remain unresolved.
 
-    Rows whose video_id/clip_id cannot be resolved fall back to
-    ``lrs3test_<idx>`` naming with an empty ``landmark_path``, so they are
-    kept in the manifest (a test clip is never dropped just for lacking
-    landmarks). If ``landmark_mapping_csv`` is omitted entirely, EVERY row
-    falls back this way.
+    When ``landmark_mapping_csv`` is given, a row whose video_id/clip_id
+    cannot be resolved gets ``lrs3test_<idx>`` naming and a marker in
+    ``landmark_path`` (``LANDMARK_MARKER_AMBIGUOUS`` if its transcript and
+    frame count match several mapping rows, ``LANDMARK_MARKER_NOT_FOUND`` if
+    they match none). The marker is not a real file, so ``clean_manifest``
+    drops the row when the CSV is saved. This keeps every saved test set
+    limited to clips that have landmarks, so all models are evaluated on the
+    same clips. If ``landmark_mapping_csv`` is omitted entirely, no landmarks
+    are expected: rows use ``lrs3test_<idx>`` naming with an empty
+    ``landmark_path`` and are kept.
     Still fully functional, just without the trainval-matching naming
     or any landmark-inclusive evaluation.
 
@@ -372,6 +384,7 @@ def build_lrs3_test_manifest(
     # (transcript, n_frames) -> (video_id, clip_id), built once from the
     # committed mapping file.
     id_lookup = {}
+    ambiguous_keys = set()
     if landmark_mapping_csv is not None:
         mapping_df = pd.read_csv(landmark_mapping_csv, dtype={"clip_id": str}) # treat clip_id as string
         dup_mask = mapping_df.duplicated(subset=["transcript", "n_frames"], keep=False)
@@ -382,6 +395,8 @@ def build_lrs3_test_manifest(
                 "frame count, thus are excluded from matching.",
                 num_ambiguous,
             )
+        for _, r in mapping_df[dup_mask].iterrows():
+            ambiguous_keys.add((r["transcript"], r["n_frames"]))
         for _, r in mapping_df[~dup_mask].iterrows():
             id_lookup[(r["transcript"], r["n_frames"])] = (r["video_id"], r["clip_id"])
 
@@ -400,7 +415,12 @@ def build_lrs3_test_manifest(
             num_matched += 1
         else:
             sample_id = f"lrs3test_{idx}"
-            landmark_path = ""
+            if landmark_mapping_csv is None:
+                landmark_path = ""
+            elif (transcript, n_frames) in ambiguous_keys:
+                landmark_path = LANDMARK_MARKER_AMBIGUOUS
+            else:
+                landmark_path = LANDMARK_MARKER_NOT_FOUND
 
         wav_path = audio_output_dir / f"{sample_id}.wav"
         extract_wav_from_pcm(example["audio"], wav_path)
@@ -807,7 +827,11 @@ def clean_manifest(
     if bad_ids and log_path is not None:
         with open(log_path, "a") as f:
             for sid in sorted(bad_ids):
-                f.write(f"{sid}: dropped\n")
+                missing = existence_problems[existence_problems["sample_id"] == sid]
+                reasons = [f"{c}={p}" for c, p in zip(missing["column"], missing["path"])]
+                if sid in set(frame_problems["sample_id"]):
+                    reasons.append("landmark frame count mismatch")
+                f.write(f"{sid}: dropped ({'; '.join(reasons)})\n")
 
     cleaned = manifest[~manifest["sample_id"].isin(bad_ids)].reset_index(drop=True)
     logger.info("Cleaned manifest: %d -> %d rows (%d dropped)", len(manifest), len(cleaned), len(bad_ids))
