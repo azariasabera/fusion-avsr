@@ -1,25 +1,25 @@
-"""Manifest builders for GRID, LRS3-trainval, and LRS3-test-mattymchen.
+"""Manifest builders for GRID, LRS3-trainval, and LRS3-test.
 
 Turns each dataset's own raw, source-specific directory/file layout into
 ONE consistent per-clip manifest schema. Downstream code (encoders,
 fusion, training loops) should only ever need to read a manifest CSV --
 it should never need to know GRID's raw layout differs from
-LRS3-trainval's, or that LRS3-test-mattymchen is a Hugging Face parquet
+LRS3-trainval's, or that LRS3-test is a Hugging Face parquet
 dataset rather than a folder of video files.
 
 Per-clip manifest schema (one row per clip, one manifest per
 dataset+split):
 
     sample_id       unique clip identifier
-    video_path      path to the raw video file (empty for test-mattymchen)
+    video_path      path to the raw video file (empty for lrs3_test)
     audio_path      path to the extracted 16kHz mono .wav (always a real
-                    file, for every source, including test-mattymchen)
+                    file, for every source, including lrs3_test)
     landmark_path   path to the 68-point .pkl landmark file (empty for
-                    test-mattymchen -- no landmark files exist for it, see
-                    build_lrs3_test_mattymchen_manifest's docstring)
+                    lrs3_test clips whose video_id/clip_id could not be
+                    resolved, see build_lrs3_test_manifest's docstring)
     transcript      normalized, lowercased, plain text transcript
     duration_sec    clip duration in seconds
-    source          one of "lrs3_trainval", "lrs3_test_mattymchen", "grid"
+    source          one of "lrs3_trainval", "lrs3_test", "grid"
 
 GRID additionally needs a second, WORD-level table (produced by
 ``build_grid_word_segments``), because the landmark encoder's
@@ -83,17 +83,46 @@ MANIFEST_COLUMNS = [
 WORD_SEGMENT_COLUMNS = ["sample_id", "word", "start_frame", "end_frame"]
 
 
-def _maybe_write_csv(df: pd.DataFrame, output_csv: Optional[PathLike], 
-                     clean: bool=True) -> None:
+def _maybe_write_csv(df: pd.DataFrame, output_csv: Optional[PathLike]) -> None:
     """Write ``df`` to ``output_csv`` if a path was given, else do nothing."""
     if output_csv is None:
         return
     output_csv = Path(output_csv)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
-
-    if clean:
-        df = clean_manifest(df, tolerance_frames=3)
     df.to_csv(output_csv, index=False)
+
+
+def _finalize_manifest(
+    manifest: pd.DataFrame,
+    output_csv: Optional[PathLike],
+    clean: bool,
+) -> pd.DataFrame:
+    """Optionally clean a freshly built manifest, then write it to CSV.
+
+    The saved CSV is the canonical artifact later stages load instead of
+    rebuilding manifests, so the DataFrame returned here is exactly what
+    was written (cleaned when ``clean`` is True), never a different,
+    uncleaned version.
+
+    Args:
+        manifest: Freshly built manifest DataFrame.
+        output_csv: Optional CSV destination. If given and ``clean`` is
+            True, dropped sample IDs are logged to
+            ``<output_csv stem>_dropped.log`` next to it.
+        clean: If True, apply ``clean_manifest`` (missing files, landmark
+            frame-count mismatches) before writing and returning. Only
+            takes effect when ``output_csv`` is given: without a CSV the
+            manifest is returned as built, uncleaned.
+
+    Returns:
+        The manifest that was written (or would be written).
+    """
+    if clean and output_csv is not None:
+        output_csv = Path(output_csv)
+        log_path = output_csv.with_name(f"{output_csv.stem}_dropped.log")
+        manifest = clean_manifest(manifest, log_path=log_path)
+    _maybe_write_csv(manifest, output_csv)
+    return manifest
 
 
 def _parse_lrs3_transcript(txt_path: PathLike) -> str:
@@ -103,7 +132,7 @@ def _parse_lrs3_transcript(txt_path: PathLike) -> str:
     ``Text:  <TEXT IN CAPS>`` followed by a ``Conf:`` confidence line.
     This function strips the ``Text:`` prefix and lowercases the result,
     so the transcript field is directly comparable across sources (e.g.
-    with LRS3-test-mattymchen's labels, which are already plain lowercase
+    with LRS3-test labels, which are already plain lowercase
     text with no prefix).
 
     Args:
@@ -190,6 +219,7 @@ def build_lrs3_trainval_manifest(
     landmarks_root: PathLike,
     output_csv: Optional[PathLike] = None,
     limit: Optional[int] = None,
+    clean: bool = True,
 ) -> pd.DataFrame:
     """Build the per-clip manifest for the LRS3-trainval split.
 
@@ -203,19 +233,25 @@ def build_lrs3_trainval_manifest(
     Args:
         video_root: Path to the LRS3-trainval directory containing one
             ``<video_id>`` directory per source video, for example
-            ``/scratch/project_2020712/datasets/lrs3/ainncy/trainval``.
+            ``/scratch/your_project_name/datasets/lrs3/ainncy/trainval``.
         audio_output_dir: Directory that ``scripts/extract_audio.sh`` was
             told to write ``.wav`` files into. One ``.wav`` per clip is
             expected at ``<audio_output_dir>/<video_id>_<clip_id>.wav``.
         landmarks_root: Root directory containing the LRS3-trainval
             landmark files, for example
-            ``/scratch/project_2020712/datasets/lrs3/landmarks/LRS3_landmarks/trainval``.
+            ``/scratch/your_project_name/datasets/lrs3/landmarks/LRS3_landmarks/trainval``.
         output_csv: If given, the resulting manifest is also written to
             this path as a CSV file.
         limit: If given, stop after this many clips (in sorted
             video_id/clip_id order), instead of walking the entire
             split. Useful for a quick smoke test against a handful of
             real clips before committing to a full run over all ~32,000.
+        clean: If True (default) and ``output_csv`` is given, drop rows
+            with missing files or landmark frame-count mismatches (see
+            ``clean_manifest``) before writing the CSV, so the returned
+            DataFrame matches the saved CSV exactly. Dropped sample IDs
+            are logged next to ``output_csv``. Ignored without
+            ``output_csv``.
 
     Returns:
         A DataFrame with the columns listed in ``MANIFEST_COLUMNS``, one
@@ -253,8 +289,7 @@ def build_lrs3_trainval_manifest(
 
     manifest = pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
     logger.info("Built LRS3-trainval manifest: %d clips", len(manifest))
-    _maybe_write_csv(manifest, output_csv)
-    return manifest
+    return _finalize_manifest(manifest, output_csv, clean)
 
 
 def build_lrs3_test_manifest(
@@ -265,6 +300,7 @@ def build_lrs3_test_manifest(
     output_csv: Optional[PathLike] = None,
     split: str = "train",
     limit: Optional[int] = None,
+    clean: bool = True,
 ) -> pd.DataFrame:
     """Build the per-clip manifest for the LRS3 test split.
     Also saves audio clips as .wav into dedicated path.
@@ -286,8 +322,11 @@ def build_lrs3_test_manifest(
     multiple samples. The number of frames disambiguates most of them, 
     but 6 cases remain unresolved.
 
-    If ``landmark_mapping_csv`` is omitted entirely, EVERY row falls
-    back to ``lrs3test_<idx>`` naming and no landmarks are attached.
+    Rows whose video_id/clip_id cannot be resolved fall back to
+    ``lrs3test_<idx>`` naming with an empty ``landmark_path``, so they are
+    kept in the manifest (a test clip is never dropped just for lacking
+    landmarks). If ``landmark_mapping_csv`` is omitted entirely, EVERY row
+    falls back this way.
     Still fully functional, just without the trainval-matching naming
     or any landmark-inclusive evaluation.
 
@@ -307,6 +346,12 @@ def build_lrs3_test_manifest(
         split: The Hugging Face ``datasets`` split key to read.
             Defaults to ``"train"``.
         limit: If given, only the first ``limit`` rows are processed.
+        clean: If True (default) and ``output_csv`` is given, drop rows
+            with missing files or landmark frame-count mismatches (see
+            ``clean_manifest``) before writing the CSV, so the returned
+            DataFrame matches the saved CSV exactly. Dropped sample IDs
+            are logged next to ``output_csv``. Ignored without
+            ``output_csv``.
 
     Returns:
         A DataFrame with the columns listed in ``MANIFEST_COLUMNS``, one
@@ -355,7 +400,7 @@ def build_lrs3_test_manifest(
             num_matched += 1
         else:
             sample_id = f"lrs3test_{idx}"
-            landmark_path = "unresolved"
+            landmark_path = ""
 
         wav_path = audio_output_dir / f"{sample_id}.wav"
         extract_wav_from_pcm(example["audio"], wav_path)
@@ -375,8 +420,7 @@ def build_lrs3_test_manifest(
         "Built LRS3-test manifest: %d clips (%d with resolved video_id, %d fallback)",
         len(manifest), num_matched, len(manifest) - num_matched,
     )
-    _maybe_write_csv(manifest, output_csv)
-    return manifest
+    return _finalize_manifest(manifest, output_csv, clean)
 
 
 def build_grid_manifest(
@@ -385,6 +429,7 @@ def build_grid_manifest(
     audio_output_dir: PathLike,
     output_csv: Optional[PathLike] = None,
     limit: Optional[int] = None,
+    clean: bool = True,
 ) -> pd.DataFrame:
     """Build the per-clip manifest for GRID.
 
@@ -411,7 +456,7 @@ def build_grid_manifest(
 
     Args:
         grid_root: Path to the GRID dataset root (e.g.
-            ``/scratch/project_2020712/datasets/kaggle_lipnet/datasets/
+            ``/scratch/your_project_name/datasets/kaggle_lipnet/datasets/
             jedidiahangekouakou/grid-corpus-dataset-for-training-lipnet/
             versions/1/data``).
         landmarks_root: Path to the root directory where GRID landmark
@@ -426,6 +471,12 @@ def build_grid_manifest(
             speaker/clip order), instead of walking all 33 speakers.
             Useful for a quick smoke test against a handful of real
             clips before committing to a full run over all ~33,000.
+        clean: If True (default) and ``output_csv`` is given, drop rows
+            with missing files or landmark frame-count mismatches (see
+            ``clean_manifest``) before writing the CSV, so the returned
+            DataFrame matches the saved CSV exactly. Dropped sample IDs
+            are logged next to ``output_csv``. Ignored without
+            ``output_csv``.
 
     Returns:
         A DataFrame with the columns listed in ``MANIFEST_COLUMNS``, one
@@ -469,8 +520,7 @@ def build_grid_manifest(
 
     manifest = pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
     logger.info("Built GRID manifest: %d clips", len(manifest))
-    _maybe_write_csv(manifest, output_csv)
-    return manifest
+    return _finalize_manifest(manifest, output_csv, clean)
 
 
 def build_grid_word_segments(
@@ -559,7 +609,7 @@ def check_file_existence(
     """Check that every non-empty path referenced by a manifest actually exists on disk.
 
     Empty/missing path values (``""`` or ``None``, as used for
-    ``video_path``/``landmark_path`` on LRS3-test-mattymchen rows) are
+    ``video_path``/``landmark_path`` on lrs3_test rows) are
     skipped, since those are expected to be absent for that source -- this
     function only flags paths that SHOULD point to a real file but don't.
 
@@ -732,7 +782,7 @@ def clean_manifest(
 
     Does two independent checks: missing files (corrupted source videos, like
     GRID's ``s8_processed``) and frame-count differences beyond the requested
-    tolerance. Rows without a landmark path, such as LRS3-test-mattymchen
+    tolerance. Rows without a landmark path, such as unresolved lrs3_test
     rows, are skipped by the frame-count check.
 
     Args:

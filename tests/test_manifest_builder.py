@@ -24,7 +24,7 @@ from fusion_avsr.data.manifest_builder import (
     _parse_lrs3_transcript,
     build_grid_manifest,
     build_grid_word_segments,
-    build_lrs3_test_mattymchen_manifest,
+    build_lrs3_test_manifest,
     build_lrs3_trainval_manifest,
     check_file_existence,
     check_frame_count_vs_duration,
@@ -233,7 +233,9 @@ def test_build_lrs3_trainval_manifest_one_clip(tmp_path):
     (video_dir / "00001.txt").write_text("Text:  HELLO THERE\nConf:  0.99\n", encoding="utf-8")
     _write_silence_wav(audio_output_dir / "abc123_00001.wav", duration_sec=2.0)
 
-    manifest = build_lrs3_trainval_manifest(lrs3_root, audio_output_dir)
+    video_root = lrs3_root / "ainncy" / "trainval"
+    landmarks_root = lrs3_root / "landmarks" / "LRS3_landmarks" / "trainval"
+    manifest = build_lrs3_trainval_manifest(video_root, audio_output_dir, landmarks_root)
 
     assert len(manifest) == 1
     row = manifest.iloc[0]
@@ -247,34 +249,99 @@ def test_build_lrs3_trainval_manifest_one_clip(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# build_lrs3_test_mattymchen_manifest
+# build_lrs3_test_manifest
 # ---------------------------------------------------------------------------
 
-def test_build_lrs3_test_mattymchen_manifest_two_rows(tmp_path):
+def _write_lrs3_test_parquet(parquet_dir, labels, n_frames=25):
+    """Write a tiny lrs3_test-style parquet (idx, audio, video, label) for tests."""
     hf_datasets = pytest.importorskip("datasets")
-
     pcm = list(np.zeros(SAMPLE_RATE, dtype="int16"))  # 1 second of silence at 16kHz
+    video = [[[0]] for _ in range(n_frames)]  # placeholder frames, only len() is read
     dataset = hf_datasets.Dataset.from_dict({
-        "idx": [0, 1],
-        "audio": [pcm, pcm],
-        "label": ["HELLO WORLD", "how are you"],
+        "idx": list(range(len(labels))),
+        "audio": [pcm] * len(labels),
+        "video": [video] * len(labels),
+        "label": labels,
     })
-    parquet_dir = tmp_path / "parquet"
-    parquet_dir.mkdir()
+    parquet_dir.mkdir(parents=True, exist_ok=True)
     dataset.to_parquet(str(parquet_dir / "data.parquet"))
 
-    audio_output_dir = tmp_path / "audio"
-    manifest = build_lrs3_test_mattymchen_manifest(parquet_dir, audio_output_dir)
+
+def test_build_lrs3_test_manifest_without_mapping_uses_fallback_ids(tmp_path):
+    parquet_dir = tmp_path / "parquet"
+    _write_lrs3_test_parquet(parquet_dir, ["HELLO WORLD", "how are you"])
+
+    manifest = build_lrs3_test_manifest(
+        parquet_dir, tmp_path / "audio", landmarks_root=tmp_path / "landmarks",
+    )
 
     assert len(manifest) == 2
     first_row = manifest.iloc[0]
-    assert first_row["sample_id"] == "mattymchen_0"
-    assert first_row["source"] == "lrs3_test_mattymchen"
+    assert first_row["sample_id"] == "lrs3test_0"
+    assert first_row["source"] == "lrs3_test"
     assert first_row["video_path"] == ""
     assert first_row["landmark_path"] == ""
-    assert first_row["transcript"] == "hello world"  # already-lowercase label passed through
+    assert first_row["transcript"] == "hello world"
     assert first_row["duration_sec"] == pytest.approx(1.0, abs=0.01)
     assert Path(first_row["audio_path"]).exists()
+
+
+def test_build_lrs3_test_manifest_resolves_ids_from_mapping(tmp_path):
+    parquet_dir = tmp_path / "parquet"
+    _write_lrs3_test_parquet(parquet_dir, ["hello world", "how are you"], n_frames=25)
+    mapping_csv = tmp_path / "mapping.csv"
+    mapping_csv.write_text(
+        "video_id,clip_id,n_frames,transcript\nvidA,00001,25,hello world\n",
+        encoding="utf-8",
+    )
+    landmarks_root = tmp_path / "landmarks"
+
+    manifest = build_lrs3_test_manifest(
+        parquet_dir, tmp_path / "audio", landmarks_root, landmark_mapping_csv=mapping_csv,
+    )
+
+    assert list(manifest["sample_id"]) == ["vidA_00001", "lrs3test_1"]
+    assert manifest.iloc[0]["landmark_path"] == str(landmarks_root / "vidA" / "00001.pkl")
+    assert manifest.iloc[1]["landmark_path"] == ""
+
+
+def test_unresolved_lrs3_test_rows_survive_cleaning_when_saved(tmp_path):
+    parquet_dir = tmp_path / "parquet"
+    _write_lrs3_test_parquet(parquet_dir, ["hello world"])
+    output_csv = tmp_path / "manifests" / "lrs3_test.csv"
+
+    manifest = build_lrs3_test_manifest(
+        parquet_dir, tmp_path / "audio", tmp_path / "landmarks", output_csv=output_csv,
+    )
+
+    assert len(manifest) == 1
+    assert len(pd.read_csv(output_csv)) == 1
+
+
+def test_saved_csv_is_cleaned_and_matches_returned_manifest(tmp_path):
+    grid_root = tmp_path / "grid"
+    landmarks_root = tmp_path / "grid_landmarks"
+    audio_output_dir = tmp_path / "audio"
+    speaker_dir = grid_root / "s1_processed"
+    speaker_dir.mkdir(parents=True)
+    for clip in ["good", "bad"]:
+        (speaker_dir / f"{clip}.mpg").write_bytes(b"")
+        _write_grid_align(speaker_dir / "align" / f"{clip}.align", [(0, 25000, "bin")])
+        _write_silence_wav(audio_output_dir / f"s1_{clip}.wav", duration_sec=1.0)
+    (landmarks_root / "s1_processed").mkdir(parents=True)
+    with open(landmarks_root / "s1_processed" / "good.pkl", "wb") as f:
+        pickle.dump([np.zeros((68, 2), dtype="float32")] * 25, f)  # 1s * 25fps
+    # "bad" has no landmark file, so cleaning must drop it
+
+    output_csv = tmp_path / "manifests" / "grid.csv"
+    manifest = build_grid_manifest(
+        grid_root, landmarks_root, audio_output_dir, output_csv=output_csv,
+    )
+
+    saved = pd.read_csv(output_csv)
+    assert list(manifest["sample_id"]) == ["s1_good"]
+    assert list(saved["sample_id"]) == ["s1_good"]
+    assert "s1_bad" in (tmp_path / "manifests" / "grid_dropped.log").read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +357,7 @@ def test_check_file_existence_flags_missing_and_skips_empty(tmp_path):
             "sample_id": "a",
             "video_path": str(existing_video),
             "audio_path": str(tmp_path / "missing.wav"),
-            "landmark_path": "",  # expected empty for e.g. test-mattymchen, must be skipped
+            "landmark_path": "",  # expected empty for e.g. lrs3_test, must be skipped
         },
     ])
 

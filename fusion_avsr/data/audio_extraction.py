@@ -2,10 +2,10 @@
 
 Produces one real, standalone 16kHz mono ``.wav`` file per clip, for
 every data source used in this project (GRID, LRS3-trainval, and
-LRS3-test-mattymchen). Downstream code (manifest builders, data loaders)
+LRS3-test). Downstream code (manifest builders, data loaders)
 should never need to know whether a clip's audio originally lived inside
 a video container (GRID, LRS3-trainval) or as an embedded PCM array in a
-parquet row (test-mattymchen) -- after extraction, every clip has a real
+parquet row (lrs3_test) -- after extraction, every clip has a real
 ``.wav`` file on disk at a known path.
 
 The two source formats need genuinely different extraction paths:
@@ -20,7 +20,7 @@ The two source formats need genuinely different extraction paths:
   process pool would). ``get_extracted_wav_path`` resolves the path that
   script writes to for a given clip, and checks the script has actually
   been run.
-- ``extract_wav_from_pcm``: for test-mattymchen, whose audio is already
+- ``extract_wav_from_pcm``: for lrs3_test, whose audio is already
   raw 16-bit PCM samples embedded directly in the dataset. No video
   container exists for this source, so there is nothing to demux -- this
   function just writes the PCM samples out to a standard ``.wav`` file,
@@ -103,7 +103,7 @@ def extract_wav_from_pcm(
     """Write raw PCM samples out to a real ``.wav`` file.
 
     Used for sources whose audio is stored as a plain list/array of int16
-    PCM samples embedded directly in a dataset row (e.g. test-mattymchen),
+    PCM samples embedded directly in a dataset row (e.g. lrs3_test),
     rather than as a video file with an audio track. Writing these out to
     a real ``.wav`` file means downstream code (manifest builders, data
     loaders) never needs a special case for "audio that came from a
