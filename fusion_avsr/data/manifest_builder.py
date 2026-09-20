@@ -251,71 +251,105 @@ def build_lrs3_trainval_manifest(
     return manifest
 
 
-def build_lrs3_test_mattymchen_manifest(
+def build_lrs3_test_manifest(
     parquet_data_dir: PathLike,
     audio_output_dir: PathLike,
+    landmarks_root: PathLike,
+    landmark_mapping_csv: Optional[PathLike] = None,
     output_csv: Optional[PathLike] = None,
     split: str = "train",
     limit: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Build the per-clip manifest for the LRS3-test-mattymchen test set.
+    """Build the per-clip manifest for the LRS3 test split.
+    Also saves audio clips as .wav into dedicated path.
 
-    LRS3-test-mattymchen is NOT a folder of video files -- it is a
-    Hugging Face ``datasets``-format parquet dataset at
-    ``<lrs3_root>/test-mattymchen/data/*.parquet``, with schema
-    ``{idx: int64, audio: List[int16], video: List[List[List[uint8]]],
-    label: str}``. Each row's ``video`` field is already grayscale,
-    already mouth-cropped to 96x96 -- there is no raw video file to
-    reference, so ``video_path`` is left empty for every row. Likewise,
-    there are no separate landmark files shipped for this source (unlike
-    GRID and LRS3-trainval, which each have a real ``.pkl`` landmark file
-    per clip) -- so ``landmark_path`` is also left empty for every row.
+    Backed by a Hugging Face ``datasets``-format parquet dataset.
+    Schema ``{idx: int64, audio:List[int16], video: List[List[List[uint8]]], 
+    label: str}``. Each row's ``video`` field is already grayscale, already 
+    mouth-cropped to 96x96. There is no raw video FILE to reference, so 
+    ``video_path`` is always left empty.
 
-    For each row, the embedded ``audio`` PCM array is written out to a
-    real ``.wav`` file, so that test-mattymchen clips have a real audio
-    file on disk exactly like every other source.
+    The parquet's own schema has no ``video_id``/``clip_id``
+    field, so recovering it requires ``landmark_mapping_csv``: a small,
+    committed (``tests/lrs3_test_video_id_mapping_example.csv``) table 
+    of ``sample_id -> video_id, clip_id`` derived by matching this 
+    parquet's transcripts.
+
+    The transcript in the CSV is matched against the corresponding transcript 
+    in the parquet dataset. There are 26 cases where the transcript matches 
+    multiple samples. The number of frames disambiguates most of them, 
+    but 6 cases remain unresolved.
+
+    If ``landmark_mapping_csv`` is omitted entirely, EVERY row falls
+    back to ``lrs3test_<idx>`` naming and no landmarks are attached.
+    Still fully functional, just without the trainval-matching naming
+    or any landmark-inclusive evaluation.
 
     Args:
-        parquet_data_dir: Path to the directory containing the
-            ``test-mattymchen`` parquet files (i.e.
-            ``<lrs3_root>/test-mattymchen/data``).
+        parquet_data_dir: Path to the directory containing the parquet
+            files.
         audio_output_dir: Directory to write extracted ``.wav`` files
-            into. One ``.wav`` per row is written to
-            ``<audio_output_dir>/mattymchen_<idx>.wav``.
+            into -- shared with LRS3-trainval's own audio output.
+        landmarks_root: Root directory of the official LRS3 test-split
+            landmark ``.pkl`` files.
+        landmark_mapping_csv: Path to the committed
+            ``sample_id -> video_id, clip_id`` mapping. If ``None``,
+            every row uses ``lrs3test_<idx>`` naming and no landmarks
+            are attached.
         output_csv: If given, the resulting manifest is also written to
             this path as a CSV file.
-        split: The Hugging Face ``datasets`` split key to read from the
-            loaded parquet dataset. Defaults to ``"train"`` (the default
-            split name ``datasets.load_dataset`` assigns when loading a
-            directory of parquet files with no explicit split naming
-            convention). If ``split`` is not present in the loaded
-            dataset, the first available split is used instead.
-        limit: If given, only the first ``limit`` rows of the dataset are
-            processed, instead of the whole split. Useful for a quick
-            smoke test against a handful of real examples before
-            committing to a full run over all ~1,321 examples.
+        split: The Hugging Face ``datasets`` split key to read.
+            Defaults to ``"train"``.
+        limit: If given, only the first ``limit`` rows are processed.
 
     Returns:
         A DataFrame with the columns listed in ``MANIFEST_COLUMNS``, one
-        row per example, with ``source`` set to
-        ``"lrs3_test_mattymchen"``, ``video_path`` and ``landmark_path``
-        left empty for every row.
+        row per example, ``source`` set to ``"lrs3_test"``.
     """
     from datasets import load_dataset
 
     parquet_data_dir = Path(parquet_data_dir)
     audio_output_dir = Path(audio_output_dir)
+    landmarks_root = Path(landmarks_root)
 
-    logger.info("Building LRS3-test-mattymchen manifest from %s (limit=%s)", parquet_data_dir, limit)
+    logger.info("Building LRS3-test manifest from %s (limit=%s)", parquet_data_dir, limit)
     dataset_dict = load_dataset("parquet", data_dir=str(parquet_data_dir))
     dataset = dataset_dict[split] if split in dataset_dict else next(iter(dataset_dict.values()))
     if limit is not None:
         dataset = dataset.select(range(min(limit, len(dataset))))
 
+    # (transcript, n_frames) -> (video_id, clip_id), built once from the
+    # committed mapping file.
+    id_lookup = {}
+    if landmark_mapping_csv is not None:
+        mapping_df = pd.read_csv(landmark_mapping_csv, dtype={"clip_id": str}) # treat clip_id as string
+        dup_mask = mapping_df.duplicated(subset=["transcript", "n_frames"], keep=False)
+        num_ambiguous = dup_mask.sum()
+        if num_ambiguous:
+            logger.warning(
+                "%d rows in landmark_mapping_csv share both transcript and "
+                "frame count, thus are excluded from matching.",
+                num_ambiguous,
+            )
+        for _, r in mapping_df[~dup_mask].iterrows():
+            id_lookup[(r["transcript"], r["n_frames"])] = (r["video_id"], r["clip_id"])
+
     rows = []
+    num_matched = 0
     for example in dataset:
         idx = example["idx"]
-        sample_id = f"mattymchen_{idx}"
+        transcript = example["label"].strip().lower()
+        n_frames = len(example["video"])
+
+        video_id, clip_id = id_lookup.get((transcript, n_frames), (None, None))
+
+        if video_id is not None:
+            sample_id = f"{video_id}_{clip_id}"
+            landmark_path = str(landmarks_root / video_id / f"{clip_id}.pkl")
+            num_matched += 1
+        else:
+            sample_id = f"lrs3test_{idx}"
+            landmark_path = ""
 
         wav_path = audio_output_dir / f"{sample_id}.wav"
         extract_wav_from_pcm(example["audio"], wav_path)
@@ -324,14 +358,17 @@ def build_lrs3_test_mattymchen_manifest(
             "sample_id": sample_id,
             "video_path": "",
             "audio_path": str(wav_path),
-            "landmark_path": "",
-            "transcript": example["label"].strip().lower(),
+            "landmark_path": landmark_path,
+            "transcript": transcript,
             "duration_sec": get_wav_duration_sec(wav_path),
-            "source": "lrs3_test_mattymchen",
+            "source": "lrs3_test",
         })
 
     manifest = pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
-    logger.info("Built LRS3-test-mattymchen manifest: %d clips", len(manifest))
+    logger.info(
+        "Built LRS3-test manifest: %d clips (%d with resolved video_id, %d fallback)",
+        len(manifest), num_matched, len(manifest) - num_matched,
+    )
     _maybe_write_csv(manifest, output_csv)
     return manifest
 
