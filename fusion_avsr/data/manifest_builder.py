@@ -584,6 +584,8 @@ def check_frame_count_vs_duration(
         landmark_path = row["landmark_path"]
         if landmark_path is None or landmark_path == "":
             continue
+        if not Path(landmark_path).is_file():
+            continue
 
         with open(landmark_path, "rb") as f:
             landmarks = pickle.load(f)
@@ -612,37 +614,17 @@ def check_frame_count_vs_duration(
 
 
 def _probe_video_fps(video_path: PathLike) -> float:
-    """Read a video file's frame rate via ffprobe.
-
-    Reads only the container's stream metadata (the ``r_frame_rate``
-    field), not the actual video frames, so this is cheap to run across
-    an entire manifest even though it shells out to a subprocess per
-    clip.
+    """Read a video file's frame rate via torchcodec.
 
     Args:
         video_path: Path to a video file.
 
     Returns:
-        The video's frame rate, in frames per second, as a float.
-
-    Raises:
-        subprocess.CalledProcessError: If ffprobe exits with a non-zero
-            return code (e.g. the file is corrupt/unreadable).
+        The video's frame rate, in frames per second, as a float..
     """
-    command = [
-        "ffprobe",
-        "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=r_frame_rate",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        str(video_path),
-    ]
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
-
-    # ffprobe reports r_frame_rate as a "<numerator>/<denominator>"
-    # fraction string, e.g. "25/1" or "30000/1001".
-    numerator, denominator = result.stdout.strip().split("/")
-    return float(numerator) / float(denominator)
+    from torchcodec.decoders import VideoDecoder
+    decoder = VideoDecoder(str(video_path))
+    return float(decoder.metadata.average_fps)
 
 
 def check_video_fps(
