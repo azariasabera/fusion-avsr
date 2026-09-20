@@ -38,7 +38,6 @@ hand.
 from __future__ import annotations
 
 import pickle
-import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
@@ -84,12 +83,16 @@ MANIFEST_COLUMNS = [
 WORD_SEGMENT_COLUMNS = ["sample_id", "word", "start_frame", "end_frame"]
 
 
-def _maybe_write_csv(df: pd.DataFrame, output_csv: Optional[PathLike]) -> None:
+def _maybe_write_csv(df: pd.DataFrame, output_csv: Optional[PathLike], 
+                     clean: bool=True) -> None:
     """Write ``df`` to ``output_csv`` if a path was given, else do nothing."""
     if output_csv is None:
         return
     output_csv = Path(output_csv)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    if clean:
+        df = clean_manifest(df, tolerance_frames=3)
     df.to_csv(output_csv, index=False)
 
 
@@ -352,7 +355,7 @@ def build_lrs3_test_manifest(
             num_matched += 1
         else:
             sample_id = f"lrs3test_{idx}"
-            landmark_path = ""
+            landmark_path = "unresolved"
 
         wav_path = audio_output_dir / f"{sample_id}.wav"
         extract_wav_from_pcm(example["audio"], wav_path)
