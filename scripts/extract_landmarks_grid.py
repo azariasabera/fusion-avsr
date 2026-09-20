@@ -16,8 +16,8 @@ Configured via Hydra -- see configs/scripts/extract_landmarks_grid.yaml
 for all available fields and their meaning. Example invocation:
 
     python scripts/extract_landmarks_grid.py \\
-        grid_root=/scratch/project_2020712/datasets/kaggle_lipnet/.../data \\
-        landmarks_root=/scratch/project_2020712/datasets/grid_landmarks
+        grid_root=/scratch/your_project_name/datasets/kaggle_lipnet/.../data \\
+        landmarks_root=/scratch/your_project_name/datasets/grid_landmarks
 
 Note: this script only produces landmark COORDINATE files. It does not
 do anything else with them (no patch extraction, no nose-alignment --
@@ -48,10 +48,10 @@ if str(_VSR_MULTILANG_ROOT) not in sys.path:
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from fusion_avsr.utils.logging import get_logger  # noqa: E402
+import torch  # noqa: E402
+import torchvision.io  # noqa: E402
 
-import torch
-import torchvision.io
+from fusion_avsr.utils.logging import get_logger  # noqa: E402
 
 
 def _read_video_via_torchcodec(
@@ -74,7 +74,9 @@ def _read_video_via_torchcodec(
         audio tensor, and an empty metadata dictionary.
 
     Raises:
-        RuntimeError: If no video frames can be decoded.
+        RuntimeError: If any frame fails to decode. A partially decoded
+            clip is rejected rather than returned truncated, since a short
+            landmark file would silently misalign with the video.
     """
     from torchcodec.decoders import VideoDecoder
 
@@ -83,14 +85,17 @@ def _read_video_via_torchcodec(
     for frame_index in range(len(decoder)):
         try:
             frames.append(decoder[frame_index])
-        except RuntimeError:
-            break
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"Failed decoding frame {frame_index}/{len(decoder)} of {filename}: {e}"
+            ) from e
 
     if not frames:
         raise RuntimeError(f"Could not decode any frames from {filename}")
 
     video_frames = torch.stack(frames)
     return video_frames, torch.empty(0), {}
+
 
 torchvision.io.read_video = _read_video_via_torchcodec
 
@@ -166,6 +171,7 @@ def extract_landmarks_for_grid(
             landmarks = landmarks_detector(str(mpg_path))
         except Exception as e:
             logger.error("Failed on %s: %s", mpg_path, e)
+            landmarks_root.mkdir(parents=True, exist_ok=True)
             with open(landmarks_root / "landmark_errors.log", "a") as f:
                 f.write(f"{mpg_path}: {e}\n")
             num_failed += 1
@@ -177,9 +183,11 @@ def extract_landmarks_for_grid(
         output_paths.append(output_path)
 
     logger.info(
-        "Wrote %d landmark files under %s (%d already existed and were skipped)",
-        len(output_paths) - num_skipped, landmarks_root, num_skipped,
+        "Wrote %d landmark files under %s (%d already existed and were skipped, %d failed)",
+        len(output_paths) - num_skipped, landmarks_root, num_skipped, num_failed,
     )
+    if num_failed:
+        logger.warning("%d clips failed; see %s", num_failed, landmarks_root / "landmark_errors.log")
     return output_paths
 
 
