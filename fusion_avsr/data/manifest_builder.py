@@ -182,27 +182,31 @@ def _align_units_to_frame(units: int) -> int:
 
 
 def build_lrs3_trainval_manifest(
-    lrs3_root: PathLike,
+    video_root: PathLike,
     audio_output_dir: PathLike,
+    landmarks_root: PathLike,
     output_csv: Optional[PathLike] = None,
     limit: Optional[int] = None,
 ) -> pd.DataFrame:
     """Build the per-clip manifest for the LRS3-trainval split.
 
-    Walks ``<lrs3_root>/ainncy/trainval/<video_id>/<clip_id>.mp4`` (and its
-    matching ``.txt`` transcript), plus the corresponding landmark file at
-    ``<lrs3_root>/landmarks/LRS3_landmarks/trainval/<video_id>/<clip_id>.pkl``.
-    Audio is NOT extracted here -- ``scripts/extract_audio.sh`` must be
-    run against this split first (see that script's docstring); this
-    function only resolves the ``.wav`` path it wrote and fails clearly
-    if that has not happened yet.
+    Walks ``<video_root>/<video_id>/<clip_id>.mp4`` and its matching
+    ``.txt`` transcript. Landmark paths are resolved under
+    ``<landmarks_root>/<video_id>/<clip_id>.pkl``. Audio is NOT extracted
+    here -- ``scripts/extract_audio.sh`` must be run against this split
+    first (see that script's docstring); this function only resolves the
+    ``.wav`` path it wrote and fails clearly if that has not happened yet.
 
     Args:
-        lrs3_root: Path to the LRS3 dataset root (e.g.
-            ``/scratch/project_2020712/datasets/lrs3``).
+        video_root: Path to the LRS3-trainval directory containing one
+            ``<video_id>`` directory per source video, for example
+            ``/scratch/project_2020712/datasets/lrs3/ainncy/trainval``.
         audio_output_dir: Directory that ``scripts/extract_audio.sh`` was
             told to write ``.wav`` files into. One ``.wav`` per clip is
             expected at ``<audio_output_dir>/<video_id>_<clip_id>.wav``.
+        landmarks_root: Root directory containing the LRS3-trainval
+            landmark files, for example
+            ``/scratch/project_2020712/datasets/lrs3/landmarks/LRS3_landmarks/trainval``.
         output_csv: If given, the resulting manifest is also written to
             this path as a CSV file.
         limit: If given, stop after this many clips (in sorted
@@ -214,10 +218,9 @@ def build_lrs3_trainval_manifest(
         A DataFrame with the columns listed in ``MANIFEST_COLUMNS``, one
         row per clip, with ``source`` set to ``"lrs3_trainval"``.
     """
-    lrs3_root = Path(lrs3_root)
+    video_root = Path(video_root)
     audio_output_dir = Path(audio_output_dir)
-    video_root = lrs3_root / "ainncy" / "trainval"
-    landmarks_root = lrs3_root / "landmarks" / "LRS3_landmarks" / "trainval"
+    landmarks_root = Path(landmarks_root)
 
     logger.info("Building LRS3-trainval manifest from %s (limit=%s)", video_root, limit)
     rows = []
