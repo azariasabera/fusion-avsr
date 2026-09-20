@@ -5,8 +5,8 @@
 # set on the command line, e.g.:
 #
 #   python scripts/extract_landmarks_grid.py \
-#       grid_root=/scratch/project_2020712/datasets/kaggle_lipnet/.../data \
-#       landmarks_root=/scratch/project_2020712/datasets/grid_landmarks
+#       grid_root=/scratch/your_project_name/datasets/kaggle_lipnet/.../data \
+#       landmarks_root=/scratch/your_project_name/datasets/grid_landmarks
 
 defaults:
   - _self_
