@@ -89,6 +89,9 @@ LANDMARK_MARKER_NOT_FOUND = "NOT_IN_MAPPING"
 # Columns of the GRID word-segment table (see build_grid_word_segments).
 WORD_SEGMENT_COLUMNS = ["sample_id", "word", "start_frame", "end_frame"]
 
+# Columns of the LRS3-test parquet index side table (see build_lrs3_test_manifest).
+PARQUET_INDEX_COLUMNS = ["sample_id", "parquet_idx"]
+
 
 def _maybe_write_csv(df: pd.DataFrame, output_csv: Optional[PathLike]) -> None:
     """Write ``df`` to ``output_csv`` if a path was given, else do nothing."""
@@ -308,6 +311,7 @@ def build_lrs3_test_manifest(
     split: str = "train",
     limit: Optional[int] = None,
     clean: bool = True,
+    parquet_index_csv: Optional[PathLike] = None,
 ) -> pd.DataFrame:
     """Build the per-clip manifest for the LRS3 test split.
     Also saves audio clips as .wav into dedicated path.
@@ -364,7 +368,15 @@ def build_lrs3_test_manifest(
             DataFrame matches the saved CSV exactly. Dropped sample IDs
             are logged next to ``output_csv``. Ignored without
             ``output_csv``.
-
+        parquet_index_csv: If given, a side table with columns
+            ``PARQUET_INDEX_COLUMNS`` (``sample_id, parquet_idx``) is
+            written to this path, mapping each manifest row's
+            ``sample_id`` to its ``idx`` (row position) in the parquet
+            dataset. It exists because this source's audio and frames live
+            in a parquet dataset addressed by row position, while
+            ``sample_id`` (``<video_id>_<clip_id>`` where matched,
+            ``lrs3test_<idx>`` as fallback) does not equal that position in
+            general.
     Returns:
         A DataFrame with the columns listed in ``MANIFEST_COLUMNS``, one
         row per example, ``source`` set to ``"lrs3_test"``.
@@ -401,6 +413,7 @@ def build_lrs3_test_manifest(
             id_lookup[(r["transcript"], r["n_frames"])] = (r["video_id"], r["clip_id"])
 
     rows = []
+    parquet_index_rows = []
     num_matched = 0
     for example in dataset:
         idx = example["idx"]
@@ -434,13 +447,23 @@ def build_lrs3_test_manifest(
             "duration_sec": get_wav_duration_sec(wav_path),
             "source": "lrs3_test",
         })
+        parquet_index_rows.append({"sample_id": sample_id, "parquet_idx": idx})
 
     manifest = pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
     logger.info(
         "Built LRS3-test manifest: %d clips (%d with resolved video_id, %d fallback)",
         len(manifest), num_matched, len(manifest) - num_matched,
     )
-    return _finalize_manifest(manifest, output_csv, clean)
+    manifest = _finalize_manifest(manifest, output_csv, clean)
+
+    if parquet_index_csv is not None:
+        # Keep only rows that survived cleaning, so the side table matches
+        # the returned/saved manifest exactly.
+        parquet_index = pd.DataFrame(parquet_index_rows, columns=PARQUET_INDEX_COLUMNS)
+        parquet_index = parquet_index[parquet_index["sample_id"].isin(manifest["sample_id"])]
+        _maybe_write_csv(parquet_index, parquet_index_csv)
+        logger.info("Wrote LRS3-test parquet index (%d rows) to %s", len(parquet_index), parquet_index_csv)
+    return manifest
 
 
 def build_grid_manifest(
