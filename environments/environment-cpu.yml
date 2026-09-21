@@ -18,6 +18,8 @@ dependencies:
   - matplotlib
   - tqdm
   - pyyaml
+  - hydra-core
+  - omegaconf
   - librosa
   - ipykernel
   - pysoundfile

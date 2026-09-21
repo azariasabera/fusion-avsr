@@ -45,6 +45,7 @@ ENV/
 *.flac
 *.npy
 *.npz
+*.pkl
 *.zip
 *.tar
 *.tar.gz
