@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Extract 16kHz mono .wav audio from GRID (.mpg) or LRS3-trainval (.mp4)
+# Extract 16kHz mono .wav audio from GRID (.mpg) or LRS3 trainval/test (.mp4)
 # video files, in parallel, via ffmpeg + xargs.
 #
 # Usage:
@@ -8,8 +8,8 @@
 #
 # <dataset_root> depends on which dataset you are extracting:
 #
-#   - LRS3-trainval: point at .../ainncy/trainval (the directory
-#     containing one <video_id>/ subdirectory per video, each holding
+#   - LRS3 (trainval or test): point at .../ainncy/trainval or .../lrs3/test
+#     (the directory containing one <video_id>/ subdirectory per video, each holding
 #     that video's <clip_id>.mp4 clips). Output files are named
 #     <video_id>_<clip_id>.wav.
 #
@@ -21,7 +21,7 @@
 #
 # This script auto-detects which of the two layouts it is looking at by
 # searching for .mp4 vs .mpg files under <dataset_root> -- run it once
-# per dataset (it does not mix LRS3-trainval and GRID clips in one run).
+# per dataset (it does not mix LRS3 and GRID clips in one run).
 #
 # Already-extracted files (an output .wav already present at the
 # expected path) are skipped, so a large batch job can be safely resumed

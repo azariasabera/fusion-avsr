@@ -14,6 +14,11 @@ bash /scratch/your_project_name/codes/fusion-avsr/scripts/extract_audio.sh \
   8
 
 bash /scratch/your_project_name/codes/fusion-avsr/scripts/extract_audio.sh \
+  /scratch/your_project_name/datasets/lrs3/test \
+  /scratch/your_project_name/datasets/extracted_audio \
+  8
+
+bash /scratch/your_project_name/codes/fusion-avsr/scripts/extract_audio.sh \
   /scratch/your_project_name/datasets/kaggle_lipnet/datasets/jedidiahangekouakou/grid-corpus-dataset-for-training-lipnet/versions/1/data \
   /scratch/your_project_name/datasets/extracted_audio \
   8
