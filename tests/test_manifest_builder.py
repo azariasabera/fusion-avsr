@@ -19,15 +19,12 @@ import soundfile as sf
 import fusion_avsr.data.manifest_builder as manifest_builder
 from fusion_avsr.data.manifest_builder import (
     GRID_NON_WORD_TOKENS,
-    LANDMARK_MARKER_AMBIGUOUS,
-    LANDMARK_MARKER_NOT_FOUND,
     _align_units_to_frame,
     _parse_grid_align,
     _parse_lrs3_transcript,
     build_grid_manifest,
     build_grid_word_segments,
-    build_lrs3_test_manifest,
-    build_lrs3_trainval_manifest,
+    build_lrs3_manifest,
     check_file_existence,
     check_frame_count_vs_duration,
     check_video_fps,
@@ -222,10 +219,10 @@ def test_build_grid_manifest_raises_if_audio_not_extracted(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# build_lrs3_trainval_manifest
+# build_lrs3_manifest
 # ---------------------------------------------------------------------------
 
-def test_build_lrs3_trainval_manifest_one_clip(tmp_path):
+def test_build_lrs3_manifest_one_clip(tmp_path):
     lrs3_root = tmp_path / "lrs3"
     audio_output_dir = tmp_path / "audio"
 
@@ -237,7 +234,9 @@ def test_build_lrs3_trainval_manifest_one_clip(tmp_path):
 
     video_root = lrs3_root / "ainncy" / "trainval"
     landmarks_root = lrs3_root / "landmarks" / "LRS3_landmarks" / "trainval"
-    manifest = build_lrs3_trainval_manifest(video_root, audio_output_dir, landmarks_root)
+    manifest = build_lrs3_manifest(
+        video_root, audio_output_dir, landmarks_root, source="lrs3_trainval",
+    )
 
     assert len(manifest) == 1
     row = manifest.iloc[0]
@@ -250,98 +249,27 @@ def test_build_lrs3_trainval_manifest_one_clip(tmp_path):
     )
 
 
-# ---------------------------------------------------------------------------
-# build_lrs3_test_manifest
-# ---------------------------------------------------------------------------
+def test_build_lrs3_manifest_sets_source_for_test_split(tmp_path):
+    video_root = tmp_path / "lrs3" / "test"
+    audio_output_dir = tmp_path / "audio"
+    video_dir = video_root / "vidA"
+    video_dir.mkdir(parents=True)
+    (video_dir / "00002.mp4").write_bytes(b"")
+    (video_dir / "00002.txt").write_text("Text:  GOOD MORNING\nConf:  0.90\n", encoding="utf-8")
+    _write_silence_wav(audio_output_dir / "vidA_00002.wav", duration_sec=1.0)
 
-def _write_lrs3_test_parquet(parquet_dir, labels, n_frames=25):
-    """Write a tiny lrs3_test-style parquet (idx, audio, video, label) for tests."""
-    hf_datasets = pytest.importorskip("datasets")
-    pcm = list(np.zeros(SAMPLE_RATE, dtype="int16"))  # 1 second of silence at 16kHz
-    video = [[[0]] for _ in range(n_frames)]  # placeholder frames, only len() is read
-    dataset = hf_datasets.Dataset.from_dict({
-        "idx": list(range(len(labels))),
-        "audio": [pcm] * len(labels),
-        "video": [video] * len(labels),
-        "label": labels,
-    })
-    parquet_dir.mkdir(parents=True, exist_ok=True)
-    dataset.to_parquet(str(parquet_dir / "data.parquet"))
-
-
-def test_build_lrs3_test_manifest_without_mapping_uses_fallback_ids(tmp_path):
-    parquet_dir = tmp_path / "parquet"
-    _write_lrs3_test_parquet(parquet_dir, ["HELLO WORLD", "how are you"])
-
-    manifest = build_lrs3_test_manifest(
-        parquet_dir, tmp_path / "audio", landmarks_root=tmp_path / "landmarks",
+    manifest = build_lrs3_manifest(
+        video_root, audio_output_dir, tmp_path / "landmarks", source="lrs3_test",
     )
 
-    assert len(manifest) == 2
-    first_row = manifest.iloc[0]
-    assert first_row["sample_id"] == "lrs3test_0"
-    assert first_row["source"] == "lrs3_test"
-    assert first_row["video_path"] == ""
-    assert first_row["landmark_path"] == ""
-    assert first_row["transcript"] == "hello world"
-    assert first_row["duration_sec"] == pytest.approx(1.0, abs=0.01)
-    assert Path(first_row["audio_path"]).exists()
+    assert list(manifest["sample_id"]) == ["vidA_00002"]
+    assert manifest.iloc[0]["source"] == "lrs3_test"
+    assert manifest.iloc[0]["video_path"] == str(video_dir / "00002.mp4")
 
 
-def test_build_lrs3_test_manifest_resolves_ids_from_mapping(tmp_path):
-    parquet_dir = tmp_path / "parquet"
-    _write_lrs3_test_parquet(parquet_dir, ["hello world", "how are you"], n_frames=25)
-    mapping_csv = tmp_path / "mapping.csv"
-    mapping_csv.write_text(
-        "video_id,clip_id,n_frames,transcript\nvidA,00001,25,hello world\n",
-        encoding="utf-8",
-    )
-    landmarks_root = tmp_path / "landmarks"
-
-    manifest = build_lrs3_test_manifest(
-        parquet_dir, tmp_path / "audio", landmarks_root, landmark_mapping_csv=mapping_csv,
-    )
-
-    assert list(manifest["sample_id"]) == ["vidA_00001", "lrs3test_1"]
-    assert manifest.iloc[0]["landmark_path"] == str(landmarks_root / "vidA" / "00001.pkl")
-    assert manifest.iloc[1]["landmark_path"] == LANDMARK_MARKER_NOT_FOUND
-
-
-def test_build_lrs3_test_manifest_marks_ambiguous_mapping_rows(tmp_path):
-    parquet_dir = tmp_path / "parquet"
-    _write_lrs3_test_parquet(parquet_dir, ["hello world"], n_frames=25)
-    mapping_csv = tmp_path / "mapping.csv"
-    mapping_csv.write_text(
-        "video_id,clip_id,n_frames,transcript\n"
-        "vidA,00001,25,hello world\nvidB,00002,25,hello world\n",
-        encoding="utf-8",
-    )
-
-    manifest = build_lrs3_test_manifest(
-        parquet_dir, tmp_path / "audio", tmp_path / "landmarks", landmark_mapping_csv=mapping_csv,
-    )
-
-    assert manifest.iloc[0]["landmark_path"] == LANDMARK_MARKER_AMBIGUOUS
-
-
-def test_unresolved_rows_dropped_on_save_only_when_mapping_given(tmp_path):
-    parquet_dir = tmp_path / "parquet"
-    _write_lrs3_test_parquet(parquet_dir, ["hello world"])
-    mapping_csv = tmp_path / "mapping.csv"
-    mapping_csv.write_text("video_id,clip_id,n_frames,transcript\n", encoding="utf-8")
-
-    without_mapping = build_lrs3_test_manifest(
-        parquet_dir, tmp_path / "audio", tmp_path / "landmarks",
-        output_csv=tmp_path / "no_mapping" / "lrs3_test.csv",
-    )
-    with_mapping = build_lrs3_test_manifest(
-        parquet_dir, tmp_path / "audio", tmp_path / "landmarks",
-        landmark_mapping_csv=mapping_csv, output_csv=tmp_path / "mapping" / "lrs3_test.csv",
-    )
-
-    assert len(without_mapping) == 1  # no mapping given: no landmarks expected, row kept
-    assert len(with_mapping) == 0  # mapping given but clip unmatched: dropped
-    assert LANDMARK_MARKER_NOT_FOUND in (tmp_path / "mapping" / "lrs3_test_dropped.log").read_text()
+def test_build_lrs3_manifest_rejects_unknown_source(tmp_path):
+    with pytest.raises(ValueError):
+        build_lrs3_manifest(tmp_path, tmp_path, tmp_path, source="lrs3_pretrain")
 
 
 def test_saved_csv_is_cleaned_and_matches_returned_manifest(tmp_path):
@@ -383,7 +311,7 @@ def test_check_file_existence_flags_missing_and_skips_empty(tmp_path):
             "sample_id": "a",
             "video_path": str(existing_video),
             "audio_path": str(tmp_path / "missing.wav"),
-            "landmark_path": "",  # expected empty for e.g. lrs3_test, must be skipped
+            "landmark_path": "",  # empty paths must be skipped
         },
     ])
 
