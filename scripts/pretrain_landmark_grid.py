@@ -47,35 +47,36 @@ from fusion_avsr.utils.logging import get_logger  # noqa: E402
 logger = get_logger(__name__)
 
 
-def _split_indices_by_clip(
+def _split_indices_by_speaker(
     word_segments: pd.DataFrame,
-    val_fraction: float,
+    num_val_speakers: int,
     seed: int,
 ) -> Tuple[List[int], List[int]]:
-    """Split word-segment row indices into train/val, splitting at the CLIP level.
+    """Split word-segment row indices into train/val, holding out whole SPEAKERS.
 
-    Splitting individual word segments independently would leak a clip's
-    other words into the opposite split; every word segment belonging to
-    a given ``sample_id`` is kept entirely on one side.
+    ``sample_id`` is ``<speaker_id>_<clip_id>``. Splitting at the clip
+    level would still let val share a speaker's voice/appearance with
+    train; holding out entire speakers instead keeps every word segment
+    from a held-out speaker's clips entirely on the val side.
 
     Args:
         word_segments: The (already clip-filtered) GRID word-segment
             table.
-        val_fraction: Fraction of unique clips assigned to validation.
-        seed: Random seed controlling which clips go to validation.
+        num_val_speakers: Number of speakers to hold out for validation.
+        seed: Random seed controlling which speakers are held out.
 
     Returns:
         A tuple ``(train_indices, val_indices)`` of row indices into
         ``word_segments``.
     """
-    unique_sample_ids = sorted(word_segments["sample_id"].unique())
+    speaker_ids = word_segments["sample_id"].str.split("_", n=1).str[0]
+    unique_speakers = sorted(speaker_ids.unique())
+
     rng = random.Random(seed)
-    rng.shuffle(unique_sample_ids)
+    rng.shuffle(unique_speakers)
+    val_speakers = set(unique_speakers[:num_val_speakers])
 
-    num_val = max(1, int(round(len(unique_sample_ids) * val_fraction)))
-    val_ids = set(unique_sample_ids[:num_val])
-
-    is_val = word_segments["sample_id"].isin(val_ids)
+    is_val = speaker_ids.isin(val_speakers)
     val_indices = word_segments.index[is_val].tolist()
     train_indices = word_segments.index[~is_val].tolist()
     return train_indices, val_indices
@@ -114,7 +115,7 @@ def main(cfg: DictConfig) -> None:
         pixel_std=pixel_std,
         limit=cfg.limit,
     )
-    train_indices, val_indices = _split_indices_by_clip(full_dataset.word_segments, cfg.val_fraction, cfg.seed)
+    train_indices, val_indices = _split_indices_by_speaker(full_dataset.word_segments, cfg.num_val_speakers, cfg.seed)
     train_dataset = Subset(full_dataset, train_indices)
     val_dataset = Subset(full_dataset, val_indices)
     logger.info("Train: %d word segments, Val: %d word segments", len(train_dataset), len(val_dataset))
