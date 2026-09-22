@@ -52,7 +52,6 @@ import torch  # noqa: E402
 import torchvision.io  # noqa: E402
 
 from fusion_avsr.utils.logging import get_logger  # noqa: E402
-from fusion_avsr.utils.video import iter_decodable_frames  # noqa: E402
 
 
 def _read_video_via_torchcodec(
@@ -82,14 +81,15 @@ def _read_video_via_torchcodec(
     from torchcodec.decoders import VideoDecoder
 
     decoder = VideoDecoder(filename, dimension_order="NHWC")
-    expected_frames = len(decoder)
-    frames: list[torch.Tensor] = list(iter_decodable_frames(decoder))
+    frames: list[torch.Tensor] = []
+    for frame_index in range(len(decoder)):
+        try:
+            frames.append(decoder[frame_index])
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"Failed decoding frame {frame_index}/{len(decoder)} of {filename}: {e}"
+            ) from e
 
-    if len(frames) < expected_frames:
-        raise RuntimeError(
-            f"Only decoded {len(frames)}/{expected_frames} frames of {filename} -- "
-            f"a partially decoded clip is rejected rather than returned truncated."
-        )
     if not frames:
         raise RuntimeError(f"Could not decode any frames from {filename}")
 

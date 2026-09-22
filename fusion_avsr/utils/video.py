@@ -38,11 +38,8 @@ def decode_all_frames(decoder) -> np.ndarray:
 
     Stops silently at the first index that fails to decode, rather than
     raising -- the returned array may have fewer frames than
-    ``len(decoder)`` claims. Callers that need to reject a partially
-    decoded clip should compare the result's length against
-    ``len(decoder)`` themselves (see
-    ``scripts/extract_landmarks_grid.py``'s ``_read_video_via_torchcodec``
-    for an example that does).
+    ``len(decoder)`` claims. Trusts whatever TorchCodec actually managed
+    to decode; only fails if that's zero frames.
 
     Args:
         decoder: A ``torchcodec.decoders.VideoDecoder``.
