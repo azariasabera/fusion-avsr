@@ -28,6 +28,7 @@ from fusion_avsr.data.manifest_builder import (
     check_file_existence,
     check_frame_count_vs_duration,
     check_video_fps,
+    load_or_build_manifest,
 )
 
 SAMPLE_RATE = 16000
@@ -391,3 +392,58 @@ def test_check_video_fps_empty_when_all_match(monkeypatch):
     problems = check_video_fps(manifest, expected_fps=25)
 
     assert len(problems) == 0
+
+
+# ---------------------------------------------------------------------------
+# load_or_build_manifest
+# ---------------------------------------------------------------------------
+
+def test_load_or_build_manifest_builds_and_caches_on_first_call(tmp_path):
+    csv_path = tmp_path / "manifests" / "fake.csv"
+    calls = []
+
+    def fake_builder(foo, output_csv):
+        calls.append(foo)
+        df = pd.DataFrame([{"sample_id": "a", "foo": foo}])
+        df.to_csv(output_csv, index=False)
+        return df
+
+    result = load_or_build_manifest(csv_path, fake_builder, foo="bar")
+
+    assert calls == ["bar"]
+    assert csv_path.exists()
+    assert list(result["sample_id"]) == ["a"]
+
+
+def test_load_or_build_manifest_loads_cache_on_second_call(tmp_path):
+    csv_path = tmp_path / "fake.csv"
+    calls = []
+
+    def fake_builder(output_csv):
+        calls.append(1)
+        df = pd.DataFrame([{"sample_id": "a"}])
+        df.to_csv(output_csv, index=False)
+        return df
+
+    first = load_or_build_manifest(csv_path, fake_builder)
+    second = load_or_build_manifest(csv_path, fake_builder)
+
+    assert calls == [1]  # builder only ran once
+    pd.testing.assert_frame_equal(first, second)
+
+
+def test_load_or_build_manifest_force_rebuild_ignores_cache(tmp_path):
+    csv_path = tmp_path / "fake.csv"
+    calls = []
+
+    def fake_builder(output_csv):
+        calls.append(1)
+        df = pd.DataFrame([{"sample_id": "a", "n": len(calls)}])
+        df.to_csv(output_csv, index=False)
+        return df
+
+    load_or_build_manifest(csv_path, fake_builder)
+    result = load_or_build_manifest(csv_path, fake_builder, force_rebuild=True)
+
+    assert calls == [1, 1]
+    assert result.iloc[0]["n"] == 2

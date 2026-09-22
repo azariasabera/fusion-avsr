@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import pickle
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import pandas as pd
 
@@ -119,6 +119,53 @@ def _finalize_manifest(
         manifest = clean_manifest(manifest, log_path=log_path)
     _maybe_write_csv(manifest, output_csv)
     return manifest
+
+
+def load_or_build_manifest(
+    csv_path: PathLike,
+    builder_fn: Callable[..., pd.DataFrame],
+    force_rebuild: bool = False,
+    **builder_kwargs: object,
+) -> pd.DataFrame:
+    """Load a cached manifest CSV, building and caching it on first use.
+
+    Manifests are expensive to build (walking tens of thousands of raw
+    dataset files) but cheap to load once built. This makes that
+    build-once-then-cache pattern uniform across every caller: the first
+    call for a given ``csv_path`` builds the manifest and saves it there;
+    every later call, from any script or notebook, just loads the saved
+    CSV instead of rebuilding it. Callers that consume a manifest (e.g.
+    a pretraining dataset) should call this instead of a ``build_*``
+    function directly.
+
+    Args:
+        csv_path: Path to the manifest CSV, conventionally
+            ``fusion_avsr.data.paths.MANIFEST_DIR / "<name>.csv"``.
+        builder_fn: One of this module's ``build_*`` functions. Called as
+            ``builder_fn(**builder_kwargs, output_csv=csv_path)`` -- it
+            must accept an ``output_csv`` keyword argument and both build
+            and save the manifest in one call, exactly like every
+            ``build_*_manifest``/``build_grid_word_segments`` function in
+            this module already does.
+        force_rebuild: If True, rebuild and overwrite the cached CSV even
+            if it already exists.
+        **builder_kwargs: Forwarded to ``builder_fn``, alongside
+            ``output_csv``.
+
+    Returns:
+        The manifest DataFrame, either loaded from ``csv_path`` or freshly
+        built (and now cached at ``csv_path`` for next time).
+    """
+    csv_path = Path(csv_path)
+    if csv_path.exists() and not force_rebuild:
+        logger.info("Loading cached manifest from %s", csv_path)
+        return pd.read_csv(csv_path)
+
+    logger.info(
+        "No cached manifest at %s (or force_rebuild=True) -- building it via %s",
+        csv_path, builder_fn.__name__,
+    )
+    return builder_fn(**builder_kwargs, output_csv=csv_path)
 
 
 def _parse_lrs3_transcript(txt_path: PathLike) -> str:

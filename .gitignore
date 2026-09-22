@@ -31,6 +31,7 @@ ENV/
 # --- Data / model artifacts ---
 /data/
 /datasets/
+/manifests/
 *.csv
 *.tsv
 *.h5
