@@ -15,7 +15,6 @@ import pickle
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
-import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
@@ -28,6 +27,7 @@ from fusion_avsr.data.manifest_builder import (
 )
 from fusion_avsr.data.paths import MANIFEST_DIR
 from fusion_avsr.models.landmark.lrlp import align_to_nose_tip, extract_lrlp_sequence
+from fusion_avsr.utils.video import decode_frame_range
 from fusion_avsr.models.landmark.normalization import normalize_frames
 from fusion_avsr.utils.logging import get_logger
 
@@ -153,8 +153,8 @@ class GridWordSegmentDataset(Dataset):
         end_frame = min(int(row["end_frame"]), len(decoder), len(clip_landmarks))
         start_frame = min(int(row["start_frame"]), end_frame)
 
-        frames = np.stack([decoder[t].numpy() for t in range(start_frame, end_frame)])
-        landmarks_segment = clip_landmarks[start_frame:end_frame]
+        frames = decode_frame_range(decoder, start_frame, end_frame)
+        landmarks_segment = clip_landmarks[start_frame:start_frame + len(frames)]
 
         patches, raw_coords, _valid_mask = extract_lrlp_sequence(frames, landmarks_segment)
         aligned_coords = align_to_nose_tip(raw_coords, landmarks_segment)  # (K, T, 2)

@@ -19,6 +19,7 @@ from typing import Optional, Sequence, Tuple, Union
 import numpy as np
 
 from fusion_avsr.utils.logging import get_logger
+from fusion_avsr.utils.video import try_decode_frame
 
 logger = get_logger(__name__)
 
@@ -71,7 +72,10 @@ def compute_dataset_pixel_stats(
         frame_indices = rng.sample(range(num_frames), k=sample_size)
 
         for frame_index in frame_indices:
-            frame = decoder[frame_index].numpy().astype(np.float64)
+            frame = try_decode_frame(decoder, frame_index)
+            if frame is None:
+                continue
+            frame = frame.numpy().astype(np.float64)
             if frame.ndim == 3:
                 frame = frame @ luma_weights
             for pixel_value in frame.ravel():
