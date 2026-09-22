@@ -31,11 +31,14 @@ audio_output_dir: null
 # run over all ~33,000 clips.
 limit: null
 
-# Number of GRID speakers held out entirely for validation (deterministic,
-# seeded pick -- see seed below). sample_id is <speaker_id>_<clip_id>, so
-# holding out whole speakers keeps a speaker's voice/appearance out of
-# train entirely, not just avoiding within-clip word leakage.
-num_val_speakers: 3
+# Fraction of GRID speakers held out entirely for validation (rounded;
+# deterministic, seeded pick -- see seed below). sample_id is
+# <speaker_id>_<clip_id>, so holding out whole speakers keeps a speaker's
+# voice/appearance out of train entirely, not just avoiding within-clip
+# word leakage. A fraction (not a fixed count) since `limit` can shrink
+# how many distinct speakers are actually present (see
+# _select_grid_clips_round_robin in manifest_builder.py).
+val_speaker_fraction: 0.1
 
 # Batch size, learning rate, and number of epochs for the word-
 # recognition pretext task.

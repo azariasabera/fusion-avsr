@@ -49,7 +49,7 @@ logger = get_logger(__name__)
 
 def _split_indices_by_speaker(
     word_segments: pd.DataFrame,
-    num_val_speakers: int,
+    val_speaker_fraction: float,
     seed: int,
 ) -> Tuple[List[int], List[int]]:
     """Split word-segment row indices into train/val, holding out whole SPEAKERS.
@@ -59,18 +59,42 @@ def _split_indices_by_speaker(
     train; holding out entire speakers instead keeps every word segment
     from a held-out speaker's clips entirely on the val side.
 
+    The number of speakers held out is a FRACTION of however many unique
+    speakers are actually present (rounded), not a fixed count -- with
+    ``limit`` set (e.g. for a smoke test), round-robin clip selection
+    (see ``_select_grid_clips_round_robin`` in manifest_builder.py) can
+    mean far fewer than GRID's full 33 speakers are present, so a fixed
+    absolute count could hold out too many (or too few) of them.
+
     Args:
         word_segments: The (already clip-filtered) GRID word-segment
             table.
-        num_val_speakers: Number of speakers to hold out for validation.
+        val_speaker_fraction: Fraction of unique speakers to hold out for
+            validation (e.g. 0.1 -> ~10%, rounded).
         seed: Random seed controlling which speakers are held out.
 
     Returns:
         A tuple ``(train_indices, val_indices)`` of row indices into
         ``word_segments``.
+
+    Raises:
+        ValueError: If fewer than 2 unique speakers remain after
+            filtering -- there is nothing meaningful to split (should
+            only trigger on a pathologically small ``limit``, e.g. 1).
     """
     speaker_ids = word_segments["sample_id"].str.split("_", n=1).str[0]
     unique_speakers = sorted(speaker_ids.unique())
+
+    if len(unique_speakers) < 2:
+        message = (
+            f"Need at least 2 unique speakers to split train/val, found "
+            f"{len(unique_speakers)} -- check that `limit` isn't cutting the dataset "
+            f"down to a single speaker."
+        )
+        logger.error(message)
+        raise ValueError(message)
+
+    num_val_speakers = max(1, min(len(unique_speakers) - 1, round(val_speaker_fraction * len(unique_speakers))))
 
     rng = random.Random(seed)
     rng.shuffle(unique_speakers)
@@ -115,7 +139,7 @@ def main(cfg: DictConfig) -> None:
         pixel_std=pixel_std,
         limit=cfg.limit,
     )
-    train_indices, val_indices = _split_indices_by_speaker(full_dataset.word_segments, cfg.num_val_speakers, cfg.seed)
+    train_indices, val_indices = _split_indices_by_speaker(full_dataset.word_segments, cfg.val_speaker_fraction, cfg.seed)
     train_dataset = Subset(full_dataset, train_indices)
     val_dataset = Subset(full_dataset, val_indices)
     logger.info("Train: %d word segments, Val: %d word segments", len(train_dataset), len(val_dataset))
