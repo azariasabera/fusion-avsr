@@ -1,0 +1,68 @@
+# Hydra config for scripts/pretrain_landmark_grid.py.
+#
+# grid_root, landmarks_root, and audio_output_dir have no sensible
+# default (they are machine-specific paths, e.g. under /scratch/... on
+# Roihu) and MUST be set on the command line, e.g.:
+#
+#   python scripts/pretrain_landmark_grid.py \
+#       grid_root=/scratch/your_project_name/datasets/kaggle_lipnet/.../data \
+#       landmarks_root=/scratch/your_project_name/datasets/grid_landmarks \
+#       audio_output_dir=/scratch/your_project_name/datasets/grid_audio
+
+defaults:
+  - _self_
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+# GRID dataset root, landmark .pkl root, and extracted-audio root -- same
+# meaning as in configs/scripts/extract_landmarks_grid.yaml.
+grid_root: null
+landmarks_root: null
+audio_output_dir: null
+
+# If set, only the first `limit` GRID clips (in sorted speaker/clip
+# order) are used -- both for manifest building and pixel-stats
+# computation. Useful for a quick smoke test before committing to a full
+# run over all ~33,000 clips.
+limit: null
+
+# Fraction of GRID clips (not word segments -- split at the clip level,
+# so no single clip's words are split across train/val) held out for
+# validation.
+val_fraction: 0.1
+
+# Batch size, learning rate, and number of epochs for the word-
+# recognition pretext task.
+batch_size: 32
+learning_rate: 1.0e-3
+num_epochs: 20
+num_workers: 4
+
+# Adam weight decay (L2 regularization). This pretraining needs to
+# generalize to LRS3
+weight_decay: 1.0e-4
+
+# Number of epochs with no val-accuracy improvement before training stops
+# early (see the best-checkpoint-save logic, which tracks the same
+# metric). Training also still stops at num_epochs regardless.
+early_stopping_patience: 5
+
+# Number of frames randomly sampled per video when computing the
+# dataset-level pixel mean/std (see
+# fusion_avsr.models.landmark.normalization.compute_dataset_pixel_stats).
+pixel_stats_frames_per_video: 10
+
+# Device string for training (e.g. "cuda:0" or "cpu").
+device: cuda:0
+
+# Every random process (train/val split, DataLoader shuffling, pixel-stat
+# frame sampling) is seeded from this value by default.
+seed: 42
+
+# Directory to write the best checkpoint (by val accuracy) to.
+checkpoint_dir: checkpoints/landmark_pretrain
