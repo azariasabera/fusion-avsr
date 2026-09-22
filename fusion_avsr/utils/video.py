@@ -18,6 +18,11 @@ import numpy as np
 def iter_decodable_frames(decoder) -> Iterator[object]:
     """Yield ``decoder[0], decoder[1], ...``, stopping cleanly at the first index that fails to decode.
 
+    Two distinct failure modes, both meaning "no more real frames here":
+        - IndexError: asking for an index at/past len(decoder)
+        - RuntimeError: a real decode failure INSIDE the claimed length
+    Both are treated identically: stop collecting, keep what decoded.
+    
     Args:
         decoder: A ``torchcodec.decoders.VideoDecoder``.
 
@@ -28,9 +33,9 @@ def iter_decodable_frames(decoder) -> Iterator[object]:
     while True:
         try:
             yield decoder[i]
-        except RuntimeError:
+            i += 1
+        except (RuntimeError, IndexError):
             return
-        i += 1
 
 
 def decode_all_frames(decoder) -> np.ndarray:
