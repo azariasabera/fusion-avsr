@@ -8,6 +8,7 @@ only their paths are recorded); audio files are real, short synthetic
 real.
 """
 
+import json
 import pickle
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from fusion_avsr.data.manifest_builder import (
     _align_units_to_frame,
     _parse_grid_align,
     _parse_lrs3_transcript,
+    _select_grid_clips_round_robin,
     build_grid_manifest,
     build_grid_word_segments,
     build_lrs3_manifest,
@@ -96,6 +98,70 @@ def test_parse_grid_align_reads_all_rows_including_sil_sp(tmp_path):
 ])
 def test_align_units_to_frame_conversion(units, expected_frame):
     assert _align_units_to_frame(units) == expected_frame
+
+
+# ---------------------------------------------------------------------------
+# _select_grid_clips_round_robin
+# ---------------------------------------------------------------------------
+
+def _make_speaker_dirs_with_clips(root, speaker_to_clips):
+    """Create <root>/<speaker>/<clip>.mpg for each speaker's list of clip names."""
+    speaker_dirs = []
+    for speaker, clips in speaker_to_clips.items():
+        speaker_dir = root / speaker
+        speaker_dir.mkdir(parents=True, exist_ok=True)
+        for clip in clips:
+            (speaker_dir / f"{clip}.mpg").write_bytes(b"")
+        speaker_dirs.append(speaker_dir)
+    return sorted(speaker_dirs)
+
+
+def test_select_grid_clips_round_robin_spans_speakers_before_repeating(tmp_path):
+    speaker_dirs = _make_speaker_dirs_with_clips(tmp_path, {
+        "s1_processed": ["clip1", "clip2"],
+        "s2_processed": ["clip1", "clip2"],
+        "s3_processed": ["clip1", "clip2"],
+    })
+
+    selected = _select_grid_clips_round_robin(speaker_dirs, limit=3)
+
+    assert [p.parent.name for p in selected] == ["s1_processed", "s2_processed", "s3_processed"]
+    assert [p.stem for p in selected] == ["clip1", "clip1", "clip1"]
+
+
+def test_select_grid_clips_round_robin_wraps_to_second_clip(tmp_path):
+    speaker_dirs = _make_speaker_dirs_with_clips(tmp_path, {
+        "s1_processed": ["clip1", "clip2"],
+        "s2_processed": ["clip1", "clip2"],
+    })
+
+    selected = _select_grid_clips_round_robin(speaker_dirs, limit=4)
+
+    assert [(p.parent.name, p.stem) for p in selected] == [
+        ("s1_processed", "clip1"), ("s2_processed", "clip1"),
+        ("s1_processed", "clip2"), ("s2_processed", "clip2"),
+    ]
+
+
+def test_select_grid_clips_round_robin_stops_when_every_speaker_exhausted(tmp_path):
+    speaker_dirs = _make_speaker_dirs_with_clips(tmp_path, {"s1_processed": ["clip1"]})
+
+    selected = _select_grid_clips_round_robin(speaker_dirs, limit=5)
+
+    assert len(selected) == 1
+
+
+def test_select_grid_clips_round_robin_none_limit_returns_every_clip_sorted(tmp_path):
+    speaker_dirs = _make_speaker_dirs_with_clips(tmp_path, {
+        "s2_processed": ["clip2", "clip1"],
+        "s1_processed": ["clip1"],
+    })
+
+    selected = _select_grid_clips_round_robin(speaker_dirs, limit=None)
+
+    assert [(p.parent.name, p.stem) for p in selected] == [
+        ("s1_processed", "clip1"), ("s2_processed", "clip1"), ("s2_processed", "clip2"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +269,26 @@ def test_build_grid_manifest_limit_caps_number_of_clips(tmp_path):
     manifest = build_grid_manifest(grid_root, landmarks_root, audio_output_dir, limit=1)
 
     assert len(manifest) == 1
+
+
+def test_build_grid_manifest_and_word_segments_reference_same_clips_with_limit(tmp_path):
+    grid_root = tmp_path / "grid"
+    landmarks_root = tmp_path / "grid_landmarks"
+    audio_output_dir = tmp_path / "audio"
+
+    for speaker in ["s1_processed", "s2_processed"]:
+        speaker_dir = grid_root / speaker
+        for clip in ["clip1", "clip2"]:
+            speaker_dir.mkdir(parents=True, exist_ok=True)
+            (speaker_dir / f"{clip}.mpg").write_bytes(b"")
+            _write_grid_align(speaker_dir / "align" / f"{clip}.align", [(0, 25000, "bin")])
+            sample_id = f"{speaker.replace('_processed', '')}_{clip}"
+            _write_silence_wav(audio_output_dir / f"{sample_id}.wav", duration_sec=1.0)
+
+    manifest = build_grid_manifest(grid_root, landmarks_root, audio_output_dir, limit=2)
+    word_segments = build_grid_word_segments(grid_root, limit=2)
+
+    assert set(manifest["sample_id"]) == set(word_segments["sample_id"]) == {"s1_clip1", "s2_clip1"}
 
 
 def test_build_grid_manifest_raises_if_audio_not_extracted(tmp_path):
@@ -447,3 +533,57 @@ def test_load_or_build_manifest_force_rebuild_ignores_cache(tmp_path):
 
     assert calls == [1, 1]
     assert result.iloc[0]["n"] == 2
+
+
+def _fake_manifest_builder(output_csv, **_kwargs):
+    df = pd.DataFrame([{"sample_id": "a"}])
+    df.to_csv(output_csv, index=False)
+    return df
+
+
+def test_load_or_build_manifest_writes_params_sidecar(tmp_path):
+    csv_path = tmp_path / "fake.csv"
+
+    load_or_build_manifest(csv_path, _fake_manifest_builder, limit=5, grid_root=Path("/some/root"))
+
+    params_path = tmp_path / "fake.params.json"
+    assert params_path.exists()
+    recorded = json.loads(params_path.read_text())
+    assert recorded == {"limit": 5, "grid_root": "/some/root"}  # Path serialized as str
+
+
+def test_load_or_build_manifest_raises_on_param_mismatch(tmp_path):
+    csv_path = tmp_path / "fake.csv"
+    load_or_build_manifest(csv_path, _fake_manifest_builder, limit=5)
+
+    with pytest.raises(ValueError, match="different parameters"):
+        load_or_build_manifest(csv_path, _fake_manifest_builder, limit=10)
+
+
+def test_load_or_build_manifest_same_params_loads_cache_fine(tmp_path):
+    csv_path = tmp_path / "fake.csv"
+    load_or_build_manifest(csv_path, _fake_manifest_builder, limit=5)
+
+    result = load_or_build_manifest(csv_path, _fake_manifest_builder, limit=5)
+
+    assert list(result["sample_id"]) == ["a"]
+
+
+def test_load_or_build_manifest_missing_sidecar_trusts_cache(tmp_path):
+    csv_path = tmp_path / "fake.csv"
+    pd.DataFrame([{"sample_id": "a"}]).to_csv(csv_path, index=False)  # no sidecar written
+
+    result = load_or_build_manifest(csv_path, _fake_manifest_builder, limit=5)
+
+    assert list(result["sample_id"]) == ["a"]
+
+
+def test_load_or_build_manifest_force_rebuild_bypasses_param_mismatch(tmp_path):
+    csv_path = tmp_path / "fake.csv"
+    load_or_build_manifest(csv_path, _fake_manifest_builder, limit=5)
+
+    result = load_or_build_manifest(csv_path, _fake_manifest_builder, limit=10, force_rebuild=True)
+
+    assert list(result["sample_id"]) == ["a"]
+    params_path = tmp_path / "fake.params.json"
+    assert json.loads(params_path.read_text()) == {"limit": 10}

@@ -34,6 +34,7 @@ hand.
 
 from __future__ import annotations
 
+import json
 import pickle
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple, Union
@@ -121,6 +122,11 @@ def _finalize_manifest(
     return manifest
 
 
+def _serialize_params(params: dict) -> dict:
+    """Make a builder_kwargs dict JSON-safe (Path -> str), for the sidecar params file."""
+    return {key: (str(value) if isinstance(value, Path) else value) for key, value in params.items()}
+
+
 def load_or_build_manifest(
     csv_path: PathLike,
     builder_fn: Callable[..., pd.DataFrame],
@@ -138,6 +144,13 @@ def load_or_build_manifest(
     a pretraining dataset) should call this instead of a ``build_*``
     function directly.
 
+    The exact ``builder_kwargs`` used to build the cached CSV are also
+    recorded, alongside it, in a ``<name>.params.json`` sidecar file. A
+    later call with different parameters (a different ``limit``, a
+    different root path, etc.) against the same ``csv_path`` would
+    otherwise silently serve a manifest built for different arguments --
+    this compares recorded vs. requested parameters and raises instead.
+
     Args:
         csv_path: Path to the manifest CSV, conventionally
             ``fusion_avsr.data.paths.MANIFEST_DIR / "<name>.csv"``.
@@ -147,17 +160,42 @@ def load_or_build_manifest(
             and save the manifest in one call, exactly like every
             ``build_*_manifest``/``build_grid_word_segments`` function in
             this module already does.
-        force_rebuild: If True, rebuild and overwrite the cached CSV even
-            if it already exists.
+        force_rebuild: If True, rebuild and overwrite the cached CSV (and
+            its params sidecar) even if it already exists.
         **builder_kwargs: Forwarded to ``builder_fn``, alongside
             ``output_csv``.
 
     Returns:
         The manifest DataFrame, either loaded from ``csv_path`` or freshly
         built (and now cached at ``csv_path`` for next time).
+
+    Raises:
+        ValueError: If a cached manifest exists whose recorded params
+            sidecar disagrees with the parameters this call is requesting.
     """
     csv_path = Path(csv_path)
+    params_path = csv_path.with_name(f"{csv_path.stem}.params.json")
+    requested_params = _serialize_params(builder_kwargs)
+
     if csv_path.exists() and not force_rebuild:
+        if params_path.exists():
+            with open(params_path, "r", encoding="utf-8") as f:
+                recorded_params = json.load(f)
+            if recorded_params != requested_params:
+                message = (
+                    f"Cached manifest at {csv_path} was built with different parameters than "
+                    f"this call is requesting -- refusing to silently serve mismatched data.\n"
+                    f"  recorded:  {recorded_params}\n  requested: {requested_params}\n"
+                    f"Pass force_rebuild=True, or delete {csv_path} and {params_path}, to rebuild."
+                )
+                logger.error(message)
+                raise ValueError(message)
+        else:
+            logger.warning(
+                "Cached manifest at %s has no %s sidecar to verify parameters against "
+                "(likely built before this check existed) -- trusting it as-is.",
+                csv_path, params_path,
+            )
         logger.info("Loading cached manifest from %s", csv_path)
         return pd.read_csv(csv_path)
 
@@ -165,7 +203,13 @@ def load_or_build_manifest(
         "No cached manifest at %s (or force_rebuild=True) -- building it via %s",
         csv_path, builder_fn.__name__,
     )
-    return builder_fn(**builder_kwargs, output_csv=csv_path)
+    manifest = builder_fn(**builder_kwargs, output_csv=csv_path)
+
+    params_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(params_path, "w", encoding="utf-8") as f:
+        json.dump(requested_params, f, indent=2, sort_keys=True)
+
+    return manifest
 
 
 def _parse_lrs3_transcript(txt_path: PathLike) -> str:
@@ -254,6 +298,55 @@ def _align_units_to_frame(units: int) -> int:
     seconds = units / GRID_ALIGN_UNITS_PER_SEC
     frame = round(seconds * VIDEO_FPS)
     return frame
+
+
+def _select_grid_clips_round_robin(
+    speaker_dirs: List[Path],
+    limit: Optional[int],
+) -> List[Path]:
+    """Select up to ``limit`` GRID clips, round-robin across speakers.
+
+    One pass through all speakers takes each speaker's NEXT unused clip
+    (sorted order, never repeated) -- wrapping back to a speaker takes
+    its 2nd, 3rd, etc. clip, never re-selects the same one. This means
+    small limits still span multiple speakers instead of exhausting one
+    speaker's ~1000 clips before ever reaching a second (the old
+    sorted-first-N behavior). ``build_grid_manifest`` and
+    ``build_grid_word_segments`` both call this with the same
+    ``speaker_dirs``/``limit``, so they always reference the exact same
+    selected clip set.
+
+    Args:
+        speaker_dirs: GRID speaker directories (e.g.
+            ``<grid_root>/s10_processed``), in the order round-robin
+            visits them each pass.
+        limit: Maximum number of clips to select. ``None`` selects every
+            clip from every speaker.
+
+    Returns:
+        A list of selected ``.mpg`` paths, in round-robin selection
+        order. Fewer than ``limit`` if every speaker's clips are
+        exhausted first.
+    """
+    if limit is None:
+        return [p for d in speaker_dirs for p in sorted(d.glob("*.mpg"))]
+
+    clips_by_speaker = {d: sorted(d.glob("*.mpg")) for d in speaker_dirs}
+    cursor = {d: 0 for d in speaker_dirs}
+
+    selected = []
+    while len(selected) < limit:
+        made_progress = False
+        for d in speaker_dirs:
+            if len(selected) >= limit:
+                break
+            if cursor[d] < len(clips_by_speaker[d]):
+                selected.append(clips_by_speaker[d][cursor[d]])
+                cursor[d] += 1
+                made_progress = True
+        if not made_progress:
+            break  # every speaker's clips exhausted before reaching limit
+    return selected
 
 
 LRS3_SOURCES = ("lrs3_trainval", "lrs3_test")
@@ -395,10 +488,13 @@ def build_grid_manifest(
             expected at ``<audio_output_dir>/<speaker>_<clip>.wav``.
         output_csv: If given, the resulting manifest is also written to
             this path as a CSV file.
-        limit: If given, stop after this many clips (in sorted
-            speaker/clip order), instead of walking all 33 speakers.
-            Useful for a quick smoke test against a handful of real
-            clips before committing to a full run over all ~33,000.
+        limit: If given, select up to this many clips round-robin across
+            speakers (see ``_select_grid_clips_round_robin``), instead of
+            walking all 33 speakers in sorted order -- a small limit
+            still spans multiple speakers rather than exhausting one
+            speaker's clips before ever reaching a second. Useful for a
+            quick smoke test before committing to a full run over all
+            ~33,000 clips.
         clean: If True (default) and ``output_csv`` is given, drop rows
             with missing files or landmark frame-count mismatches (see
             ``clean_manifest``) before writing the CSV, so the returned
@@ -414,37 +510,34 @@ def build_grid_manifest(
     landmarks_root = Path(landmarks_root)
     audio_output_dir = Path(audio_output_dir)
 
+    speaker_dirs = sorted(p for p in grid_root.iterdir() if p.is_dir())
+    selected_mpg_paths = _select_grid_clips_round_robin(speaker_dirs, limit)
+
     logger.info("Building GRID manifest from %s (limit=%s)", grid_root, limit)
     rows = []
-    for speaker_dir in sorted(p for p in grid_root.iterdir() if p.is_dir()):
-        if limit is not None and len(rows) >= limit:
-            break
+    for mpg_path in selected_mpg_paths:
+        speaker_dir = mpg_path.parent
         speaker = speaker_dir.name.replace("_processed", "")
-        align_dir = speaker_dir / "align"
+        clip_id = mpg_path.stem
+        align_path = speaker_dir / "align" / f"{clip_id}.align"
+        landmark_path = landmarks_root / speaker_dir.name / f"{clip_id}.pkl"
+        sample_id = f"{speaker}_{clip_id}"
 
-        for mpg_path in sorted(speaker_dir.glob("*.mpg")):
-            if limit is not None and len(rows) >= limit:
-                break
-            clip_id = mpg_path.stem
-            align_path = align_dir / f"{clip_id}.align"
-            landmark_path = landmarks_root / speaker_dir.name / f"{clip_id}.pkl"
-            sample_id = f"{speaker}_{clip_id}"
+        wav_path = get_extracted_wav_path(audio_output_dir, sample_id)
 
-            wav_path = get_extracted_wav_path(audio_output_dir, sample_id)
+        align_rows = _parse_grid_align(align_path)
+        words = [word for (_, _, word) in align_rows if word not in GRID_NON_WORD_TOKENS]
+        transcript = " ".join(words)
 
-            align_rows = _parse_grid_align(align_path)
-            words = [word for (_, _, word) in align_rows if word not in GRID_NON_WORD_TOKENS]
-            transcript = " ".join(words)
-
-            rows.append({
-                "sample_id": sample_id,
-                "video_path": str(mpg_path),
-                "audio_path": str(wav_path),
-                "landmark_path": str(landmark_path),
-                "transcript": transcript,
-                "duration_sec": get_wav_duration_sec(wav_path),
-                "source": "grid",
-            })
+        rows.append({
+            "sample_id": sample_id,
+            "video_path": str(mpg_path),
+            "audio_path": str(wav_path),
+            "landmark_path": str(landmark_path),
+            "transcript": transcript,
+            "duration_sec": get_wav_duration_sec(wav_path),
+            "source": "grid",
+        })
 
     manifest = pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
     logger.info("Built GRID manifest: %d clips", len(manifest))
@@ -482,12 +575,15 @@ def build_grid_word_segments(
         output_csv: If given, the resulting table is also written to this
             path as a CSV file (conventionally
             ``manifests/grid_word_segments.csv``).
-        limit: If given, stop after this many CLIPS (i.e. ``.align``
-            files, in sorted speaker/clip order) have been processed --
-            note this bounds the number of source clips, not the number
-            of output word-segment rows, since one clip produces several
-            words. Useful for a quick smoke test before committing to a
-            full run over all 33,000 clips.
+        limit: If given, select up to this many CLIPS round-robin across
+            speakers (see ``_select_grid_clips_round_robin`` --
+            ``build_grid_manifest`` uses the exact same selection for the
+            same ``limit``, so the two tables always reference the same
+            clip set), instead of walking all 33 speakers in sorted
+            order. Note this bounds the number of source clips, not the
+            number of output word-segment rows, since one clip produces
+            several words. Useful for a quick smoke test before
+            committing to a full run over all 33,000 clips.
 
     Returns:
         A DataFrame with columns ``sample_id``, ``word``, ``start_frame``,
@@ -498,31 +594,27 @@ def build_grid_word_segments(
     """
     grid_root = Path(grid_root)
 
+    speaker_dirs = sorted(p for p in grid_root.iterdir() if p.is_dir())
+    selected_mpg_paths = _select_grid_clips_round_robin(speaker_dirs, limit)
+
     logger.info("Building GRID word-segment table from %s (limit=%s)", grid_root, limit)
     rows = []
-    num_clips_processed = 0
-    for speaker_dir in sorted(p for p in grid_root.iterdir() if p.is_dir()):
-        if limit is not None and num_clips_processed >= limit:
-            break
+    for mpg_path in selected_mpg_paths:
+        speaker_dir = mpg_path.parent
         speaker = speaker_dir.name.replace("_processed", "")
-        align_dir = speaker_dir / "align"
+        clip_id = mpg_path.stem
+        align_path = speaker_dir / "align" / f"{clip_id}.align"
+        sample_id = f"{speaker}_{clip_id}"
 
-        for align_path in sorted(align_dir.glob("*.align")):
-            if limit is not None and num_clips_processed >= limit:
-                break
-            clip_id = align_path.stem
-            sample_id = f"{speaker}_{clip_id}"
-            num_clips_processed += 1
-
-            for start_units, end_units, word in _parse_grid_align(align_path):
-                if word in GRID_NON_WORD_TOKENS:
-                    continue
-                rows.append({
-                    "sample_id": sample_id,
-                    "word": word,
-                    "start_frame": _align_units_to_frame(start_units),
-                    "end_frame": _align_units_to_frame(end_units),
-                })
+        for start_units, end_units, word in _parse_grid_align(align_path):
+            if word in GRID_NON_WORD_TOKENS:
+                continue
+            rows.append({
+                "sample_id": sample_id,
+                "word": word,
+                "start_frame": _align_units_to_frame(start_units),
+                "end_frame": _align_units_to_frame(end_units),
+            })
 
     word_segments = pd.DataFrame(rows, columns=WORD_SEGMENT_COLUMNS)
     logger.info("Built GRID word-segment table: %d word segments", len(word_segments))
