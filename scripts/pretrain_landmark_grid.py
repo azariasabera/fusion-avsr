@@ -110,6 +110,13 @@ def main(cfg: DictConfig) -> None:
     torch.manual_seed(cfg.seed)
     device = torch.device(cfg.device if torch.cuda.is_available() or "cpu" in cfg.device else "cpu")
 
+    logger.info(
+        "Hyperparameters: batch_size=%d learning_rate=%s weight_decay=%s num_epochs=%d "
+        "val_speaker_fraction=%s early_stopping_patience=%d seed=%d device=%s",
+        cfg.batch_size, cfg.learning_rate, cfg.weight_decay, cfg.num_epochs,
+        cfg.val_speaker_fraction, cfg.early_stopping_patience, cfg.seed, device,
+    )
+
     grid_manifest = load_or_build_manifest(
         MANIFEST_DIR / "grid_manifest.csv",
         build_grid_manifest,
@@ -162,8 +169,12 @@ def main(cfg: DictConfig) -> None:
     epochs_without_improvement = 0
 
     for epoch in range(cfg.num_epochs):
-        train_metrics = train_one_epoch(model, train_loader, optimizer, device)
-        val_metrics = evaluate(model, val_loader, device)
+        train_metrics = train_one_epoch(
+            model, train_loader, optimizer, device, desc=f"Epoch {epoch + 1}/{cfg.num_epochs} [train]",
+        )
+        val_metrics = evaluate(
+            model, val_loader, device, desc=f"Epoch {epoch + 1}/{cfg.num_epochs} [val]",
+        )
         logger.info(
             "Epoch %d/%d: train_loss=%.4f train_acc=%.4f val_loss=%.4f val_acc=%.4f",
             epoch + 1, cfg.num_epochs,

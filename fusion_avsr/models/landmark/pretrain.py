@@ -15,6 +15,7 @@ from typing import Dict, Optional, Tuple
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from fusion_avsr.models.landmark.encoder import LandmarkEncoder
 from fusion_avsr.models.landmark.ms_tcn import MSTCN
@@ -108,6 +109,7 @@ def train_one_epoch(
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    desc: str = "train",
 ) -> Dict[str, float]:
     """Run one training epoch over ``dataloader``.
 
@@ -119,6 +121,9 @@ def train_one_epoch(
         optimizer: Optimizer already constructed over ``model``'s
             parameters.
         device: Device to run the epoch on.
+        desc: Label shown on the tqdm progress bar (e.g. an epoch
+            number), so per-batch progress is visible within the epoch,
+            not just the final summary.
 
     Returns:
         A dict with ``"loss"`` and ``"accuracy"``, averaged/computed over
@@ -128,7 +133,8 @@ def train_one_epoch(
     criterion = nn.CrossEntropyLoss()
 
     total_loss, total_correct, total_examples = 0.0, 0, 0
-    for patches, coords, labels, mask in dataloader:
+    progress_bar = tqdm(dataloader, desc=desc, leave=False)
+    for patches, coords, labels, mask in progress_bar:
         patches, coords, labels, mask = (
             patches.to(device), coords.to(device), labels.to(device), mask.to(device)
         )
@@ -143,6 +149,7 @@ def train_one_epoch(
         total_loss += loss.item() * batch_size
         total_correct += (logits.argmax(dim=-1) == labels).sum().item()
         total_examples += batch_size
+        progress_bar.set_postfix(loss=total_loss / total_examples, acc=total_correct / total_examples)
 
     return {"loss": total_loss / total_examples, "accuracy": total_correct / total_examples}
 
@@ -152,6 +159,7 @@ def evaluate(
     model: GridWordRecognitionModel,
     dataloader: DataLoader,
     device: torch.device,
+    desc: str = "eval",
 ) -> Dict[str, float]:
     """Evaluate ``model`` over ``dataloader`` without updating parameters.
 
@@ -160,6 +168,7 @@ def evaluate(
         dataloader: Yields ``(patches, aligned_coords, labels, mask)``
             batches.
         device: Device to run evaluation on.
+        desc: Label shown on the tqdm progress bar.
 
     Returns:
         A dict with ``"loss"`` and ``"accuracy"``.
@@ -168,7 +177,8 @@ def evaluate(
     criterion = nn.CrossEntropyLoss()
 
     total_loss, total_correct, total_examples = 0.0, 0, 0
-    for patches, coords, labels, mask in dataloader:
+    progress_bar = tqdm(dataloader, desc=desc, leave=False)
+    for patches, coords, labels, mask in progress_bar:
         patches, coords, labels, mask = (
             patches.to(device), coords.to(device), labels.to(device), mask.to(device)
         )
@@ -180,5 +190,6 @@ def evaluate(
         total_loss += loss.item() * batch_size
         total_correct += (logits.argmax(dim=-1) == labels).sum().item()
         total_examples += batch_size
+        progress_bar.set_postfix(loss=total_loss / total_examples, acc=total_correct / total_examples)
 
     return {"loss": total_loss / total_examples, "accuracy": total_correct / total_examples}
