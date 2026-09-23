@@ -19,6 +19,7 @@ for all available fields. Example invocation:
 
 from __future__ import annotations
 
+import json
 import random
 import sys
 from pathlib import Path
@@ -102,6 +103,33 @@ def _split_indices_by_speaker(
     return train_indices, val_indices
 
 
+def _plot_training_curves(history: List[Dict[str, float]], output_path: Path) -> None:
+    """Plot per-epoch train/val loss and accuracy side by side, saved as one PNG."""
+    import matplotlib.pyplot as plt
+
+    epochs = [entry["epoch"] for entry in history]
+    fig, (loss_ax, acc_ax) = plt.subplots(1, 2, figsize=(12, 4.5))
+
+    loss_ax.plot(epochs, [entry["train_loss"] for entry in history], label="train")
+    loss_ax.plot(epochs, [entry["val_loss"] for entry in history], label="val")
+    loss_ax.set_xlabel("epoch")
+    loss_ax.set_ylabel("loss")
+    loss_ax.set_title("Loss")
+    loss_ax.legend()
+
+    acc_ax.plot(epochs, [entry["train_accuracy"] for entry in history], label="train")
+    acc_ax.plot(epochs, [entry["val_accuracy"] for entry in history], label="val")
+    acc_ax.set_xlabel("epoch")
+    acc_ax.set_ylabel("accuracy")
+    acc_ax.set_title("Accuracy")
+    acc_ax.legend()
+
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
 @hydra.main(version_base=None, config_path="../configs/scripts", config_name="pretrain_landmark_grid")
 def main(cfg: DictConfig) -> None:
     if cfg.grid_root is None or cfg.landmarks_root is None or cfg.audio_output_dir is None:
@@ -167,6 +195,7 @@ def main(cfg: DictConfig) -> None:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     best_val_accuracy = 0.0
     epochs_without_improvement = 0
+    history: List[Dict[str, float]] = []
 
     for epoch in range(cfg.num_epochs):
         train_metrics = train_one_epoch(
@@ -182,6 +211,15 @@ def main(cfg: DictConfig) -> None:
             val_metrics["loss"], val_metrics["accuracy"],
         )
         scheduler.step(val_metrics["loss"])
+
+        history.append({
+            "epoch": epoch + 1,
+            "train_loss": train_metrics["loss"],
+            "train_accuracy": train_metrics["accuracy"],
+            "val_loss": val_metrics["loss"],
+            "val_accuracy": val_metrics["accuracy"],
+            "learning_rate": optimizer.param_groups[0]["lr"],
+        })
 
         if val_metrics["accuracy"] > best_val_accuracy:
             best_val_accuracy = val_metrics["accuracy"]
@@ -207,6 +245,15 @@ def main(cfg: DictConfig) -> None:
                     epochs_without_improvement, cfg.early_stopping_patience, epoch + 1, cfg.num_epochs,
                 )
                 break
+
+    history_path = checkpoint_dir / "history.json"
+    with open(history_path, "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2)
+    logger.info("Wrote training history to %s", history_path)
+
+    curves_path = checkpoint_dir / "training_curves.png"
+    _plot_training_curves(history, curves_path)
+    logger.info("Wrote training curves to %s", curves_path)
 
 
 if __name__ == "__main__":
