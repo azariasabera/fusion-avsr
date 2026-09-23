@@ -110,7 +110,9 @@ class GridWordSegmentDataset(Dataset):
             grid_root=grid_root,
             limit=limit,
         )
-        word_segments = filter_grid_word_segments(word_segments, grid_manifest)
+        word_segments = filter_grid_word_segments(
+            word_segments, grid_manifest, log_path=manifest_dir / "grid_word_segments_dropped.log",
+        )
 
         self._clip_paths: Dict[str, Tuple[str, str]] = {
             row.sample_id: (row.video_path, row.landmark_path) for row in grid_manifest.itertuples()
@@ -150,11 +152,8 @@ class GridWordSegmentDataset(Dataset):
             clip_landmarks = pickle.load(f)
 
         decoder = VideoDecoder(video_path, dimension_order="NHWC")
-        end_frame = min(int(row["end_frame"]), len(decoder), len(clip_landmarks))
-        start_frame = min(int(row["start_frame"]), end_frame)
-
-        frames = decode_frame_range(decoder, start_frame, end_frame)
-        landmarks_segment = clip_landmarks[start_frame:start_frame + len(frames)]
+        frames = decode_frame_range(decoder, int(row["start_frame"]), int(row["end_frame"]))
+        landmarks_segment = clip_landmarks[int(row["start_frame"]):int(row["start_frame"]) + len(frames)]
 
         patches, raw_coords, _valid_mask = extract_lrlp_sequence(frames, landmarks_segment)
         aligned_coords = align_to_nose_tip(raw_coords, landmarks_segment)  # (K, T, 2)

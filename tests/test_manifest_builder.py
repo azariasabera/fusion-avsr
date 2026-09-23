@@ -31,6 +31,8 @@ from fusion_avsr.data.manifest_builder import (
     check_file_existence,
     check_frame_count_vs_duration,
     check_video_fps,
+    compute_landmark_frame_counts,
+    filter_grid_word_segments,
     load_or_build_manifest,
 )
 
@@ -66,6 +68,22 @@ def _write_grid_align_with_mpg(align_path, rows) -> None:
     speaker_dir = align_path.parent.parent  # align_path is <speaker_dir>/align/<clip>.align
     clip_id = align_path.stem
     (speaker_dir / f"{clip_id}.mpg").write_bytes(b"")
+
+
+def _stub_real_frame_counts(monkeypatch, count=10_000) -> None:
+    """Bypass build_grid_word_segments's real-decode pass in tests using empty placeholder .mpg files.
+
+    compute_real_decodable_frame_counts actually decodes each clip;
+    empty placeholder .mpg files can't be decoded at all (real count 0),
+    which would clamp every word segment's end_frame to 0 and drop it.
+    Tests that don't specifically exercise the real-frame-count clamping
+    should stub a generous count instead, so a clip's word segments keep
+    their .align-derived frame boundaries unclamped.
+    """
+    monkeypatch.setattr(
+        manifest_builder, "compute_real_decodable_frame_counts",
+        lambda manifest, log_path=None: {sid: count for sid in manifest["sample_id"]},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +202,7 @@ def test_select_grid_clips_round_robin_none_limit_returns_every_clip_sorted(tmp_
 # build_grid_word_segments
 # ---------------------------------------------------------------------------
 
-def test_build_grid_word_segments_excludes_sil_and_sp(tmp_path):
+def test_build_grid_word_segments_excludes_sil_and_sp(tmp_path, monkeypatch):
     grid_root = tmp_path / "grid"
     _write_grid_align_with_mpg(grid_root / "s1_processed" / "align" / "bbaf2n.align", [
         (0, 25000, "sil"),
@@ -193,6 +211,7 @@ def test_build_grid_word_segments_excludes_sil_and_sp(tmp_path):
         (62500, 65000, "sp"),
         (65000, 90000, "again"),
     ])
+    _stub_real_frame_counts(monkeypatch)
 
     word_segments = build_grid_word_segments(grid_root)
 
@@ -200,11 +219,12 @@ def test_build_grid_word_segments_excludes_sil_and_sp(tmp_path):
     assert not set(word_segments["word"]) & GRID_NON_WORD_TOKENS
 
 
-def test_build_grid_word_segments_frame_conversion_and_sample_id(tmp_path):
+def test_build_grid_word_segments_frame_conversion_and_sample_id(tmp_path, monkeypatch):
     grid_root = tmp_path / "grid"
     _write_grid_align_with_mpg(grid_root / "s3_processed" / "align" / "clip1.align", [
         (25000, 50000, "lay"),
     ])
+    _stub_real_frame_counts(monkeypatch)
 
     word_segments = build_grid_word_segments(grid_root)
 
@@ -215,12 +235,13 @@ def test_build_grid_word_segments_frame_conversion_and_sample_id(tmp_path):
     assert row["end_frame"] == 50
 
 
-def test_build_grid_word_segments_drops_zero_length_segments_and_logs(tmp_path):
+def test_build_grid_word_segments_drops_zero_length_segments_and_logs(tmp_path, monkeypatch):
     grid_root = tmp_path / "grid"
     _write_grid_align_with_mpg(grid_root / "s1_processed" / "align" / "clip1.align", [
         (25000, 50000, "bin"),  # 1 full frame -> kept
         (50000, 50500, "b"),    # rounds to start_frame == end_frame -> dropped
     ])
+    _stub_real_frame_counts(monkeypatch)
     log_path = tmp_path / "dropped.log"
 
     word_segments = build_grid_word_segments(grid_root, log_path=log_path)
@@ -231,10 +252,44 @@ def test_build_grid_word_segments_drops_zero_length_segments_and_logs(tmp_path):
     assert "'b'" in log_text
 
 
-def test_build_grid_word_segments_limit_caps_number_of_clips(tmp_path):
+def test_build_grid_word_segments_clamps_end_frame_to_real_decodable_count(tmp_path, monkeypatch):
+    grid_root = tmp_path / "grid"
+    _write_grid_align_with_mpg(grid_root / "s1_processed" / "align" / "clip1.align", [
+        (0, 100000, "word"),  # .align timing alone implies end_frame=100
+    ])
+    monkeypatch.setattr(
+        manifest_builder, "compute_real_decodable_frame_counts",
+        lambda manifest, log_path=None: {sid: 60 for sid in manifest["sample_id"]},
+    )
+
+    word_segments = build_grid_word_segments(grid_root)
+
+    assert len(word_segments) == 1
+    assert word_segments.iloc[0]["end_frame"] == 60  # clamped to the real, shorter count
+
+
+def test_build_grid_word_segments_drops_segment_entirely_beyond_real_frame_count(tmp_path, monkeypatch):
+    grid_root = tmp_path / "grid"
+    _write_grid_align_with_mpg(grid_root / "s1_processed" / "align" / "clip1.align", [
+        (100000, 150000, "late_word"),  # start_frame=100, past the clip's real 60 frames
+    ])
+    monkeypatch.setattr(
+        manifest_builder, "compute_real_decodable_frame_counts",
+        lambda manifest, log_path=None: {sid: 60 for sid in manifest["sample_id"]},
+    )
+    log_path = tmp_path / "dropped.log"
+
+    word_segments = build_grid_word_segments(grid_root, log_path=log_path)
+
+    assert len(word_segments) == 0
+    assert "late_word" in log_path.read_text()
+
+
+def test_build_grid_word_segments_limit_caps_number_of_clips(tmp_path, monkeypatch):
     grid_root = tmp_path / "grid"
     _write_grid_align_with_mpg(grid_root / "s1_processed" / "align" / "clip1.align", [(0, 25000, "bin")])
     _write_grid_align_with_mpg(grid_root / "s1_processed" / "align" / "clip2.align", [(0, 25000, "lay")])
+    _stub_real_frame_counts(monkeypatch)
 
     word_segments = build_grid_word_segments(grid_root, limit=1)
 
@@ -242,11 +297,12 @@ def test_build_grid_word_segments_limit_caps_number_of_clips(tmp_path):
     assert word_segments.iloc[0]["sample_id"] == "s1_clip1"
 
 
-def test_build_grid_word_segments_writes_csv_when_requested(tmp_path):
+def test_build_grid_word_segments_writes_csv_when_requested(tmp_path, monkeypatch):
     grid_root = tmp_path / "grid"
     _write_grid_align_with_mpg(grid_root / "s1_processed" / "align" / "clip1.align", [
         (0, 25000, "bin"),
     ])
+    _stub_real_frame_counts(monkeypatch)
     output_csv = tmp_path / "manifests" / "grid_word_segments.csv"
 
     build_grid_word_segments(grid_root, output_csv=output_csv)
@@ -303,7 +359,7 @@ def test_build_grid_manifest_limit_caps_number_of_clips(tmp_path):
     assert len(manifest) == 1
 
 
-def test_build_grid_manifest_and_word_segments_reference_same_clips_with_limit(tmp_path):
+def test_build_grid_manifest_and_word_segments_reference_same_clips_with_limit(tmp_path, monkeypatch):
     grid_root = tmp_path / "grid"
     landmarks_root = tmp_path / "grid_landmarks"
     audio_output_dir = tmp_path / "audio"
@@ -316,6 +372,7 @@ def test_build_grid_manifest_and_word_segments_reference_same_clips_with_limit(t
             _write_grid_align(speaker_dir / "align" / f"{clip}.align", [(0, 25000, "bin")])
             sample_id = f"{speaker.replace('_processed', '')}_{clip}"
             _write_silence_wav(audio_output_dir / f"{sample_id}.wav", duration_sec=1.0)
+    _stub_real_frame_counts(monkeypatch)
 
     manifest = build_grid_manifest(grid_root, landmarks_root, audio_output_dir, limit=2)
     word_segments = build_grid_word_segments(grid_root, limit=2)
@@ -676,3 +733,76 @@ def test_load_or_build_manifest_force_rebuild_bypasses_param_mismatch(tmp_path):
     assert list(result["sample_id"]) == ["a"]
     params_path = tmp_path / "fake.params.json"
     assert json.loads(params_path.read_text()) == {"limit": 10}
+
+
+# ---------------------------------------------------------------------------
+# compute_landmark_frame_counts / filter_grid_word_segments
+# ---------------------------------------------------------------------------
+
+def _write_landmarks(path, num_frames) -> None:
+    """Write a landmark .pkl file of the given length (contents don't matter, only len())."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        pickle.dump([None] * num_frames, f)
+
+
+def test_compute_landmark_frame_counts_reads_real_lengths(tmp_path):
+    landmark_path = tmp_path / "clip.pkl"
+    _write_landmarks(landmark_path, num_frames=42)
+    manifest = pd.DataFrame([{"sample_id": "a", "landmark_path": str(landmark_path)}])
+
+    counts = compute_landmark_frame_counts(manifest)
+
+    assert counts == {"a": 42}
+
+
+def test_compute_landmark_frame_counts_logs_and_zeros_unloadable_clips(tmp_path):
+    manifest = pd.DataFrame([{"sample_id": "bad", "landmark_path": str(tmp_path / "missing.pkl")}])
+    log_path = tmp_path / "failed.log"
+
+    counts = compute_landmark_frame_counts(manifest, log_path=log_path)
+
+    assert counts == {"bad": 0}
+    assert "bad" in log_path.read_text()
+
+
+def test_filter_grid_word_segments_drops_rows_for_missing_clips(tmp_path):
+    word_segments = pd.DataFrame([
+        {"sample_id": "s1_a", "word": "bin", "start_frame": 0, "end_frame": 10},
+        {"sample_id": "s1_b", "word": "lay", "start_frame": 0, "end_frame": 10},
+    ])
+    landmark_path = tmp_path / "s1_a.pkl"
+    _write_landmarks(landmark_path, num_frames=100)
+    manifest = pd.DataFrame([{"sample_id": "s1_a", "landmark_path": str(landmark_path)}])
+
+    filtered = filter_grid_word_segments(word_segments, manifest)
+
+    assert list(filtered["sample_id"]) == ["s1_a"]  # s1_b's clip isn't in manifest
+
+
+def test_filter_grid_word_segments_clamps_end_frame_to_landmark_count(tmp_path):
+    word_segments = pd.DataFrame([
+        {"sample_id": "s1_a", "word": "bin", "start_frame": 0, "end_frame": 100},
+    ])
+    landmark_path = tmp_path / "s1_a.pkl"
+    _write_landmarks(landmark_path, num_frames=60)  # shorter than end_frame implies
+    manifest = pd.DataFrame([{"sample_id": "s1_a", "landmark_path": str(landmark_path)}])
+
+    filtered = filter_grid_word_segments(word_segments, manifest)
+
+    assert filtered.iloc[0]["end_frame"] == 60
+
+
+def test_filter_grid_word_segments_drops_segment_beyond_landmark_count(tmp_path):
+    word_segments = pd.DataFrame([
+        {"sample_id": "s1_a", "word": "late", "start_frame": 100, "end_frame": 150},
+    ])
+    landmark_path = tmp_path / "s1_a.pkl"
+    _write_landmarks(landmark_path, num_frames=60)
+    manifest = pd.DataFrame([{"sample_id": "s1_a", "landmark_path": str(landmark_path)}])
+    log_path = tmp_path / "dropped.log"
+
+    filtered = filter_grid_word_segments(word_segments, manifest, log_path=log_path)
+
+    assert len(filtered) == 0
+    assert "late" in log_path.read_text()

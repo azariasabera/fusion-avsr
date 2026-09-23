@@ -10,9 +10,17 @@ as a loop bound directly, so this quirk is only handled in one place.
 
 from __future__ import annotations
 
-from typing import Iterator
+from pathlib import Path
+from typing import Dict, Iterator, Optional, Union
 
 import numpy as np
+import pandas as pd
+
+from fusion_avsr.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+PathLike = Union[str, Path]
 
 
 def iter_decodable_frames(decoder) -> Iterator[object]:
@@ -80,11 +88,59 @@ def decode_frame_range(decoder, start: int, end: int) -> np.ndarray:
     for i in range(start, end):
         try:
             frames.append(decoder[i].numpy())
-        except RuntimeError:
+        except (RuntimeError, IndexError):
             break
     if not frames:
         raise RuntimeError(f"No frames could be decoded in range [{start}, {end})")
     return np.stack(frames)
+
+
+def compute_real_decodable_frame_counts(
+    manifest: pd.DataFrame,
+    log_path: Optional[PathLike] = None,
+    _open_decoder=None,
+) -> Dict[str, int]:
+    """Decode every clip in ``manifest`` once and record its real, 
+    actually-decodable frame count.
+
+    Args:
+        manifest: A per-clip manifest-shaped DataFrame with ``sample_id``
+            and ``video_path`` columns.
+        log_path: Optional path to an append-only log file. Clips that
+            fail to open/decode at all are logged here and given a count
+            of 0, rather than crashing this whole batch pass over one
+            bad file.
+        _open_decoder: Test-only injection point: a ``video_path ->
+            decoder`` callable, defaulting to a real
+            ``torchcodec.decoders.VideoDecoder``. Lets this function's
+            per-clip loop be unit tested with a fake decoder, without
+            needing torchcodec installed.
+
+    Returns:
+        A dict mapping each ``sample_id`` to its real decodable frame
+        count.
+    """
+    if _open_decoder is None:
+        from torchcodec.decoders import VideoDecoder
+        _open_decoder = lambda video_path: VideoDecoder(video_path, dimension_order="NHWC")
+
+    counts: Dict[str, int] = {}
+    failed_lines = []
+    for row in manifest.itertuples():
+        try:
+            decoder = _open_decoder(row.video_path)
+            counts[row.sample_id] = sum(1 for _ in iter_decodable_frames(decoder))
+        except Exception as e:
+            counts[row.sample_id] = 0
+            failed_lines.append(f"{row.sample_id}: failed to decode {row.video_path} ({e})\n")
+
+    if failed_lines:
+        logger.warning("compute_real_decodable_frame_counts: %d clip(s) failed to decode", len(failed_lines))
+        if log_path is not None:
+            with open(log_path, "a") as f:
+                f.writelines(failed_lines)
+
+    return counts
 
 
 def try_decode_frame(decoder, index: int) -> object:
@@ -101,5 +157,5 @@ def try_decode_frame(decoder, index: int) -> object:
     """
     try:
         return decoder[index]
-    except RuntimeError:
+    except (RuntimeError, IndexError):
         return None

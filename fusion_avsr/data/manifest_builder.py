@@ -46,6 +46,7 @@ from fusion_avsr.data.audio_extraction import (
     get_wav_duration_sec,
 )
 from fusion_avsr.utils.logging import get_logger
+from fusion_avsr.utils.video import compute_real_decodable_frame_counts
 
 logger = get_logger(__name__)
 
@@ -563,6 +564,55 @@ def build_grid_manifest(
     return _finalize_manifest(manifest, output_csv, clean)
 
 
+def _clamp_word_segments(
+    word_segments: pd.DataFrame,
+    frame_counts: Dict[str, int],
+    reason: str,
+    log_path: Optional[PathLike] = None,
+) -> pd.DataFrame:
+    """Clamp each segment's ``end_frame`` to its parent clip's entry 
+    in ``frame_counts``, dropping empties.
+
+    Args:
+        word_segments: A word-segment table with ``sample_id``, ``word``,
+            ``start_frame``, ``end_frame`` columns.
+        frame_counts: ``sample_id -> the max frame index (exclusive) this
+            clip actually supports``.
+        reason: Short label identifying which count this clamp was
+            against (e.g. ``"real_frame_count"`` or
+            ``"landmark_frame_count"``), included in dropped-row log
+            lines and the summary ``logger.warning``.
+        log_path: Optional append-only log file for dropped rows.
+
+    Returns:
+        A copy of ``word_segments``, ``end_frame`` clamped, rows left
+        with no usable frames removed, index reset.
+    """
+    max_frames = word_segments["sample_id"].map(frame_counts)
+    max_frames = max_frames.fillna(word_segments["end_frame"])
+    clamped_end_frame = word_segments["end_frame"].where(
+        word_segments["end_frame"] <= max_frames, max_frames
+    ).astype(int)
+    keep_mask = word_segments["start_frame"] < clamped_end_frame
+
+    if (~keep_mask).any():
+        dropped = word_segments[~keep_mask]
+        dropped_ends = clamped_end_frame[~keep_mask]
+        dropped_lines = [
+            f"{row.sample_id}: dropped word={row.word!r} (start_frame={row.start_frame} >= "
+            f"clamped end_frame={end}, {reason}={frame_counts.get(row.sample_id)})\n"
+            for row, end in zip(dropped.itertuples(), dropped_ends)
+        ]
+        logger.warning("Dropped %d word segment(s) clamping against %s", len(dropped_lines), reason)
+        if log_path is not None:
+            with open(log_path, "a") as f:
+                f.writelines(dropped_lines)
+
+    result = word_segments[keep_mask].copy()
+    result["end_frame"] = clamped_end_frame[keep_mask]
+    return result.reset_index(drop=True)
+
+
 def build_grid_word_segments(
     grid_root: PathLike,
     output_csv: Optional[PathLike] = None,
@@ -587,10 +637,8 @@ def build_grid_word_segments(
 
     Timestamps are converted by dividing the raw ``.align`` timestamp (in
     units of 1/25000 second) by 25000 to get seconds, then multiplying by
-    25fps to get a frame index. Segments whose ``start_frame >=
-    end_frame`` are dropped rather than kept as a zero/negative-length
-    row.
-
+    25fps to get a frame index. 
+    
     Args:
         grid_root: Path to the GRID dataset root (same as
             ``build_grid_manifest``'s ``grid_root`` argument).
@@ -599,8 +647,9 @@ def build_grid_word_segments(
             ``manifests/grid_word_segments.csv``).
         limit: If given, select up to this many CLIPS round-robin across
             speakers (see ``_select_grid_clips_round_robin``).
-        log_path: Optional path to an append-only log file. Dropped
-            zero/negative-length word segments are logged here. If
+        log_path: Optional path to an append-only log file. Dropped word
+            segments (and any clip that failed to decode at all -- see
+            ``compute_real_decodable_frame_counts``) are logged here. If
             not given but ``output_csv`` is, a
             ``<output_csv stem>_dropped_segments.log`` path next to it is
             used instead.
@@ -614,12 +663,28 @@ def build_grid_word_segments(
     """
     grid_root = Path(grid_root)
 
+    if log_path is None and output_csv is not None:
+        output_csv_path = Path(output_csv)
+        log_path = output_csv_path.with_name(f"{output_csv_path.stem}_dropped_segments.log")
+
     speaker_dirs = sorted(p for p in grid_root.iterdir() if p.is_dir())
     selected_mpg_paths = _select_grid_clips_round_robin(speaker_dirs, limit)
 
+    clip_sample_ids = []
+    clip_video_paths = []
+    for mpg_path in selected_mpg_paths:
+        speaker = mpg_path.parent.name.replace("_processed", "")
+        clip_sample_ids.append(f"{speaker}_{mpg_path.stem}")
+        clip_video_paths.append(str(mpg_path))
+    clip_manifest = pd.DataFrame({"sample_id": clip_sample_ids, "video_path": clip_video_paths})
+
+    logger.info(
+        "Decoding %d GRID clip(s) once to find their real frame counts...", len(clip_manifest)
+    )
+    real_frame_counts = compute_real_decodable_frame_counts(clip_manifest, log_path=log_path)
+
     logger.info("Building GRID word-segment table from %s (limit=%s)", grid_root, limit)
     rows = []
-    dropped_lines = []
     for mpg_path in selected_mpg_paths:
         speaker_dir = mpg_path.parent
         speaker = speaker_dir.name.replace("_processed", "")
@@ -630,35 +695,17 @@ def build_grid_word_segments(
         for start_units, end_units, word in _parse_grid_align(align_path):
             if word in GRID_NON_WORD_TOKENS:
                 continue
-            start_frame = _align_units_to_frame(start_units)
-            end_frame = _align_units_to_frame(end_units)
-            if start_frame >= end_frame:
-                dropped_lines.append(
-                    f"{sample_id}: dropped word={word!r} "
-                    f"(start_frame={start_frame} >= end_frame={end_frame})\n"
-                )
-                continue
             rows.append({
                 "sample_id": sample_id,
                 "word": word,
-                "start_frame": start_frame,
-                "end_frame": end_frame,
+                "start_frame": _align_units_to_frame(start_units),
+                "end_frame": _align_units_to_frame(end_units),
             })
 
-    if dropped_lines:
-        if log_path is None and output_csv is not None:
-            output_csv = Path(output_csv)
-            log_path = output_csv.with_name(f"{output_csv.stem}_dropped_segments.log")
-        if log_path is not None:
-            with open(log_path, "a") as f:
-                f.writelines(dropped_lines)
-
     word_segments = pd.DataFrame(rows, columns=WORD_SEGMENT_COLUMNS)
-    if dropped_lines:
-        logger.warning(
-            "Dropped %d zero/negative-length word segment(s) (start_frame >= end_frame)",
-            len(dropped_lines),
-        )
+    word_segments = _clamp_word_segments(
+        word_segments, real_frame_counts, reason="real_frame_count", log_path=log_path
+    )
     logger.info("Built GRID word-segment table: %d word segments", len(word_segments))
     _maybe_write_csv(word_segments, output_csv)
     return word_segments
@@ -878,26 +925,89 @@ def clean_manifest(
     logger.info("Cleaned manifest: %d -> %d rows (%d dropped)", len(manifest), len(cleaned), len(bad_ids))
     return cleaned
 
+def compute_landmark_frame_counts(
+    manifest: pd.DataFrame,
+    log_path: Optional[PathLike] = None,
+) -> Dict[str, int]:
+    """Load each clip's landmark ``.pkl`` file once and record its real frame count.
+
+    The landmark-side counterpart to
+    ``fusion_avsr.utils.video.compute_real_decodable_frame_counts``: a
+    clip's landmark file can be shorter than its ``.align``-implied
+    duration too, independently of whether the video itself decodes
+    fully -- checked here rather than in ``build_grid_word_segments``,
+    since ``landmark_path`` is only available once joined against a
+    per-clip manifest (see ``filter_grid_word_segments``).
+
+    Args:
+        manifest: A per-clip manifest-shaped DataFrame with ``sample_id``
+            and ``landmark_path`` columns.
+        log_path: Optional path to an append-only log file. Clips whose
+            landmark file fails to load are logged here and given a
+            count of 0, rather than crashing this whole batch pass over
+            one bad file.
+
+    Returns:
+        A dict mapping each ``sample_id`` to the length of its landmark
+        list.
+    """
+    counts: Dict[str, int] = {}
+    failed_lines = []
+    for row in manifest.itertuples():
+        try:
+            with open(row.landmark_path, "rb") as f:
+                counts[row.sample_id] = len(pickle.load(f))
+        except Exception as e:
+            counts[row.sample_id] = 0
+            failed_lines.append(f"{row.sample_id}: failed to load landmark file {row.landmark_path} ({e})\n")
+
+    if failed_lines:
+        logger.warning("compute_landmark_frame_counts: %d clip(s) failed to load", len(failed_lines))
+        if log_path is not None:
+            with open(log_path, "a") as f:
+                f.writelines(failed_lines)
+
+    return counts
+
+
 def filter_grid_word_segments(
     word_segments: pd.DataFrame,
     manifest: pd.DataFrame,
+    log_path: Optional[PathLike] = None,
 ) -> pd.DataFrame:
-    """Keep word segments whose parent clips are present in a manifest.
+    """Keep word segments whose parent clips are present in a manifest, 
+    clamped to real landmark length.
 
-    This performs a semi-join on ``sample_id``. It does not check files or
-    frame counts itself, so pass the result of ``clean_manifest`` when
-    dropped clips must also be removed from the word-segment table.
+    Two things, both scoped to what ``manifest`` (not ``word_segments``)
+    knows about a clip: (1) a semi-join on ``sample_id``, dropping
+    segments whose clip isn't in ``manifest`` (e.g. dropped by
+    ``clean_manifest``); (2) clamping each remaining segment's
+    ``end_frame`` to its parent clip's actual landmark length (see
+    ``compute_landmark_frame_counts``) via ``_clamp_word_segments``.
 
     Args:
         word_segments: GRID word-segment table produced by
-            ``build_grid_word_segments``. It must contain a ``sample_id`` column.
+            ``build_grid_word_segments``. It must contain a
+            ``sample_id`` column.
         manifest: Manifest whose ``sample_id`` values define the clips to
-            keep. This should normally be a cleaned GRID manifest.
+            keep, with a ``landmark_path`` column. This should normally
+            be a cleaned GRID manifest.
+        log_path: Optional path to an append-only log file. Segments
+            dropped by the landmark-length clamp (and clips whose
+            landmark file fails to load) are logged here.
 
     Returns:
-        A copy of ``word_segments`` containing only rows whose ``sample_id``
-        occurs in ``manifest``, with the index reset. The input DataFrames
+        A copy of ``word_segments`` containing only rows whose
+        ``sample_id`` occurs in ``manifest`` and whose
+        ``[start_frame, end_frame)`` still fits within the parent clip's
+        real landmark count, with the index reset. The input DataFrames
         are not modified.
     """
     valid_ids = set(manifest["sample_id"])
-    return word_segments[word_segments["sample_id"].isin(valid_ids)].reset_index(drop=True)
+    kept = word_segments[word_segments["sample_id"].isin(valid_ids)].reset_index(drop=True)
+    if kept.empty:
+        return kept
+
+    clip_manifest = manifest[manifest["sample_id"].isin(set(kept["sample_id"]))]
+    landmark_frame_counts = compute_landmark_frame_counts(clip_manifest, log_path=log_path)
+    return _clamp_word_segments(kept, landmark_frame_counts, reason="landmark_frame_count", log_path=log_path)

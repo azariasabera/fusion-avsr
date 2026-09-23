@@ -6,9 +6,15 @@ or torchcodec install needed.
 """
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from fusion_avsr.utils.video import decode_all_frames, decode_frame_range, try_decode_frame
+from fusion_avsr.utils.video import (
+    compute_real_decodable_frame_counts,
+    decode_all_frames,
+    decode_frame_range,
+    try_decode_frame,
+)
 
 
 class _FakeFrame:
@@ -78,3 +84,32 @@ def test_try_decode_frame_returns_none_on_failure():
 
     assert try_decode_frame(decoder, 1) is not None
     assert try_decode_frame(decoder, 3) is None
+
+
+def test_compute_real_decodable_frame_counts_matches_decodable_not_claimed_length():
+    manifest = pd.DataFrame([
+        {"sample_id": "a", "video_path": "a.mp4"},
+        {"sample_id": "b", "video_path": "b.mp4"},
+    ])
+    decoders_by_path = {
+        "a.mp4": _FakeDecoder(length=100, decodable=60),  # claims 100, only 60 real
+        "b.mp4": _FakeDecoder(length=10, decodable=10),
+    }
+
+    counts = compute_real_decodable_frame_counts(manifest, _open_decoder=decoders_by_path.get)
+
+    assert counts == {"a": 60, "b": 10}
+
+
+def test_compute_real_decodable_frame_counts_logs_and_zeros_unopenable_clips(tmp_path):
+    manifest = pd.DataFrame([{"sample_id": "bad", "video_path": "bad.mp4"}])
+
+    def _raise(video_path):
+        raise RuntimeError("cannot open file")
+
+    log_path = tmp_path / "failed.log"
+
+    counts = compute_real_decodable_frame_counts(manifest, log_path=log_path, _open_decoder=_raise)
+
+    assert counts == {"bad": 0}
+    assert "bad" in log_path.read_text()
