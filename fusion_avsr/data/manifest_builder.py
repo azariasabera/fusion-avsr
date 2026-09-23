@@ -140,16 +140,10 @@ def load_or_build_manifest(
     build-once-then-cache pattern uniform across every caller: the first
     call for a given ``csv_path`` builds the manifest and saves it there;
     every later call, from any script or notebook, just loads the saved
-    CSV instead of rebuilding it. Callers that consume a manifest (e.g.
-    a pretraining dataset) should call this instead of a ``build_*``
-    function directly.
+    CSV instead of rebuilding it.
 
     The exact ``builder_kwargs`` used to build the cached CSV are also
-    recorded, alongside it, in a ``<name>.params.json`` sidecar file. A
-    later call with different parameters (a different ``limit``, a
-    different root path, etc.) against the same ``csv_path`` would
-    otherwise silently serve a manifest built for different arguments --
-    this compares recorded vs. requested parameters and raises instead.
+    recorded, alongside it, in a ``<name>.params.json`` sidecar file.
 
     Args:
         csv_path: Path to the manifest CSV, conventionally
@@ -306,15 +300,9 @@ def _select_grid_clips_round_robin(
 ) -> List[Path]:
     """Select up to ``limit`` GRID clips, round-robin across speakers.
 
-    One pass through all speakers takes each speaker's NEXT unused clip
-    (sorted order, never repeated) -- wrapping back to a speaker takes
-    its 2nd, 3rd, etc. clip, never re-selects the same one. This means
-    small limits still span multiple speakers instead of exhausting one
-    speaker's ~1000 clips before ever reaching a second (the old
-    sorted-first-N behavior). ``build_grid_manifest`` and
-    ``build_grid_word_segments`` both call this with the same
-    ``speaker_dirs``/``limit``, so they always reference the exact same
-    selected clip set.
+    One pass through all speakers takes each speaker's NEXT unused clip.
+    This way, smaller limits still span multiple speakers instead of exhausting one
+    speaker's ~1000 clips before ever reaching a second.
 
     Args:
         speaker_dirs: GRID speaker directories (e.g.
@@ -346,6 +334,50 @@ def _select_grid_clips_round_robin(
                 made_progress = True
         if not made_progress:
             break  # every speaker's clips exhausted before reaching limit
+    return selected
+
+
+def _select_lrs3_clips_round_robin(
+    video_dirs: List[Path],
+    limit: Optional[int],
+) -> List[Path]:
+    """Select up to ``limit`` LRS3 clips, round-robin across video IDs.
+
+    Same idea as ``_select_grid_clips_round_robin``, grouped by video_id
+    instead of speaker: one pass takes each video's NEXT unused clip
+    (sorted order, never repeated), so a limit spans multiple videos
+    instead of exhausting one video's clips before ever reaching the next.
+
+    Args:
+        video_dirs: LRS3 video-id directories (e.g.
+            ``<video_root>/<video_id>``), in the order round-robin
+            visits them each pass.
+        limit: Maximum number of clips to select. ``None`` selects every
+            clip from every video.
+
+    Returns:
+        A list of selected ``.mp4`` paths, in round-robin selection
+        order. Fewer than ``limit`` if every video's clips are exhausted
+        first.
+    """
+    if limit is None:
+        return [p for d in video_dirs for p in sorted(d.glob("*.mp4"))]
+
+    clips_by_video = {d: sorted(d.glob("*.mp4")) for d in video_dirs}
+    cursor = {d: 0 for d in video_dirs}
+
+    selected = []
+    while len(selected) < limit:
+        made_progress = False
+        for d in video_dirs:
+            if len(selected) >= limit:
+                break
+            if cursor[d] < len(clips_by_video[d]):
+                selected.append(clips_by_video[d][cursor[d]])
+                cursor[d] += 1
+                made_progress = True
+        if not made_progress:
+            break  # every video's clips exhausted before reaching limit
     return selected
 
 
@@ -386,9 +418,12 @@ def build_lrs3_manifest(
             ``"lrs3_trainval"`` or ``"lrs3_test"``.
         output_csv: If given, the resulting manifest is also written to
             this path as a CSV file.
-        limit: If given, stop after this many clips (in sorted
-            video_id/clip_id order), instead of walking the entire
-            split. Useful for a quick smoke test against a handful of
+        limit: If given, select up to this many clips round-robin across
+            video IDs (see ``_select_lrs3_clips_round_robin``), instead
+            of walking the entire split in sorted video_id/clip_id
+            order -- a small limit still spans multiple videos rather
+            than exhausting one video's clips before ever reaching the
+            next. Useful for a quick smoke test against a handful of
             real clips before committing to a full run.
         clean: If True (default) and ``output_csv`` is given, drop rows
             with missing files or landmark frame-count mismatches (see
@@ -413,31 +448,30 @@ def build_lrs3_manifest(
     audio_output_dir = Path(audio_output_dir)
     landmarks_root = Path(landmarks_root)
 
+    video_dirs = sorted(p for p in video_root.iterdir() if p.is_dir())
+    selected_mp4_paths = _select_lrs3_clips_round_robin(video_dirs, limit)
+
     logger.info("Building %s manifest from %s (limit=%s)", source, video_root, limit)
     rows = []
-    for video_dir in sorted(p for p in video_root.iterdir() if p.is_dir()):
-        if limit is not None and len(rows) >= limit:
-            break
+    for mp4_path in selected_mp4_paths:
+        video_dir = mp4_path.parent
         video_id = video_dir.name
-        for mp4_path in sorted(video_dir.glob("*.mp4")):
-            if limit is not None and len(rows) >= limit:
-                break
-            clip_id = mp4_path.stem
-            txt_path = video_dir / f"{clip_id}.txt"
-            landmark_path = landmarks_root / video_id / f"{clip_id}.pkl"
-            sample_id = f"{video_id}_{clip_id}"
+        clip_id = mp4_path.stem
+        txt_path = video_dir / f"{clip_id}.txt"
+        landmark_path = landmarks_root / video_id / f"{clip_id}.pkl"
+        sample_id = f"{video_id}_{clip_id}"
 
-            wav_path = get_extracted_wav_path(audio_output_dir, sample_id)
+        wav_path = get_extracted_wav_path(audio_output_dir, sample_id)
 
-            rows.append({
-                "sample_id": sample_id,
-                "video_path": str(mp4_path),
-                "audio_path": str(wav_path),
-                "landmark_path": str(landmark_path),
-                "transcript": _parse_lrs3_transcript(txt_path),
-                "duration_sec": get_wav_duration_sec(wav_path),
-                "source": source,
-            })
+        rows.append({
+            "sample_id": sample_id,
+            "video_path": str(mp4_path),
+            "audio_path": str(wav_path),
+            "landmark_path": str(landmark_path),
+            "transcript": _parse_lrs3_transcript(txt_path),
+            "duration_sec": get_wav_duration_sec(wav_path),
+            "source": source,
+        })
 
     manifest = pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
     logger.info("Built %s manifest: %d clips", source, len(manifest))
@@ -457,23 +491,14 @@ def build_grid_manifest(
     Walks ``<grid_root>/s<N>_processed/<clip>.mpg`` (and its matching
     ``.align`` file at ``<grid_root>/s<N>_processed/align/<clip>.align``).
     Audio is NOT extracted here -- ``scripts/extract_audio.sh`` must be
-    run against GRID first (see that script's docstring); this function
-    only resolves the ``.wav`` path it wrote and fails clearly if that
-    has not happened yet. Landmarks are also not generated here -- this
-    function expects a landmark ``.pkl`` file to already exist at
-    ``<landmarks_root>/s<N>_processed/<clip>.pkl`` -- i.e. the landmarks
-    directory mirrors GRID's own ``s<N>_processed/<clip>`` layout exactly,
-    just rooted at ``landmarks_root`` instead of ``grid_root`` and with a
-    ``.pkl`` extension instead of ``.mpg``. This is the same path
-    convention ``scripts/extract_landmarks_grid.py`` writes to -- the two
-    must stay in sync.
+    run against GRID first; this function only resolves the ``.wav`` path
+    it wrote and fails clearly if that has not happened yet. Landmarks are
+    also not generated here -- this function expects a landmark ``.pkl`` file
+    to already exist at ``<landmarks_root>/s<N>_processed/<clip>.pkl``.
 
-    IMPORTANT: this is a per-CLIP manifest, used only for bookkeeping and
-    consistency checks (e.g. "does every clip have a landmark file").
-    GRID's ``transcript`` field here is a plain-text rendering for humans
-    reading the manifest ONLY -- it is NOT what the word-recognition
-    pretext task actually trains on. That task trains on individual WORD
-    segments, produced by ``build_grid_word_segments`` instead.
+    This is NOT what the word-recognition pretext task actually trains on.
+    That task trains on individual WORD segments, produced by
+    ``build_grid_word_segments`` instead.
 
     Args:
         grid_root: Path to the GRID dataset root (e.g.
@@ -490,11 +515,7 @@ def build_grid_manifest(
             this path as a CSV file.
         limit: If given, select up to this many clips round-robin across
             speakers (see ``_select_grid_clips_round_robin``), instead of
-            walking all 33 speakers in sorted order -- a small limit
-            still spans multiple speakers rather than exhausting one
-            speaker's clips before ever reaching a second. Useful for a
-            quick smoke test before committing to a full run over all
-            ~33,000 clips.
+            walking all 33 speakers in sorted order.
         clean: If True (default) and ``output_csv`` is given, drop rows
             with missing files or landmark frame-count mismatches (see
             ``clean_manifest``) before writing the CSV, so the returned
@@ -576,14 +597,7 @@ def build_grid_word_segments(
             path as a CSV file (conventionally
             ``manifests/grid_word_segments.csv``).
         limit: If given, select up to this many CLIPS round-robin across
-            speakers (see ``_select_grid_clips_round_robin`` --
-            ``build_grid_manifest`` uses the exact same selection for the
-            same ``limit``, so the two tables always reference the same
-            clip set), instead of walking all 33 speakers in sorted
-            order. Note this bounds the number of source clips, not the
-            number of output word-segment rows, since one clip produces
-            several words. Useful for a quick smoke test before
-            committing to a full run over all 33,000 clips.
+            speakers (see ``_select_grid_clips_round_robin``).
 
     Returns:
         A DataFrame with columns ``sample_id``, ``word``, ``start_frame``,

@@ -24,6 +24,7 @@ from fusion_avsr.data.manifest_builder import (
     _parse_grid_align,
     _parse_lrs3_transcript,
     _select_grid_clips_round_robin,
+    _select_lrs3_clips_round_robin,
     build_grid_manifest,
     build_grid_word_segments,
     build_lrs3_manifest,
@@ -357,6 +358,63 @@ def test_build_lrs3_manifest_sets_source_for_test_split(tmp_path):
 def test_build_lrs3_manifest_rejects_unknown_source(tmp_path):
     with pytest.raises(ValueError):
         build_lrs3_manifest(tmp_path, tmp_path, tmp_path, source="lrs3_pretrain")
+
+
+def _make_video_dirs_with_clips(root, video_to_clips):
+    """Create <root>/<video_id>/<clip>.mp4 for each video's list of clip names."""
+    video_dirs = []
+    for video_id, clips in video_to_clips.items():
+        video_dir = root / video_id
+        video_dir.mkdir(parents=True, exist_ok=True)
+        for clip in clips:
+            (video_dir / f"{clip}.mp4").write_bytes(b"")
+        video_dirs.append(video_dir)
+    return sorted(video_dirs)
+
+
+def test_select_lrs3_clips_round_robin_spans_videos_before_repeating(tmp_path):
+    video_dirs = _make_video_dirs_with_clips(tmp_path, {
+        "vidA": ["00001", "00002"],
+        "vidB": ["00001", "00002"],
+    })
+
+    selected = _select_lrs3_clips_round_robin(video_dirs, limit=2)
+
+    assert [(p.parent.name, p.stem) for p in selected] == [("vidA", "00001"), ("vidB", "00001")]
+
+
+def test_select_lrs3_clips_round_robin_none_limit_returns_every_clip_sorted(tmp_path):
+    video_dirs = _make_video_dirs_with_clips(tmp_path, {
+        "vidB": ["00002", "00001"],
+        "vidA": ["00001"],
+    })
+
+    selected = _select_lrs3_clips_round_robin(video_dirs, limit=None)
+
+    assert [(p.parent.name, p.stem) for p in selected] == [
+        ("vidA", "00001"), ("vidB", "00001"), ("vidB", "00002"),
+    ]
+
+
+def test_build_lrs3_manifest_limit_spans_multiple_video_ids(tmp_path):
+    lrs3_root = tmp_path / "lrs3"
+    audio_output_dir = tmp_path / "audio"
+
+    for video_id in ["vidA", "vidB"]:
+        video_dir = lrs3_root / video_id
+        for clip in ["00001", "00002"]:
+            video_dir.mkdir(parents=True, exist_ok=True)
+            (video_dir / f"{clip}.mp4").write_bytes(b"")
+            (video_dir / f"{clip}.txt").write_text("Text:  HI\nConf:  0.9\n", encoding="utf-8")
+            _write_silence_wav(audio_output_dir / f"{video_id}_{clip}.wav", duration_sec=1.0)
+
+    manifest = build_lrs3_manifest(
+        lrs3_root, audio_output_dir, tmp_path / "landmarks", source="lrs3_trainval", limit=2,
+    )
+
+    # With sorted-first-N truncation this would have been vidA_00001/vidA_00002
+    # (one video exhausted before the next); round-robin spans both videos.
+    assert set(manifest["sample_id"]) == {"vidA_00001", "vidB_00001"}
 
 
 def test_saved_csv_is_cleaned_and_matches_returned_manifest(tmp_path):
