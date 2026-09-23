@@ -53,6 +53,21 @@ def _write_grid_align(path, rows) -> None:
             f.write(f"{start_units} {end_units} {word}\n")
 
 
+def _write_grid_align_with_mpg(align_path, rows) -> None:
+    """Write a GRID .align file, plus the matching empty .mpg placeholder next to its speaker dir.
+
+    _select_grid_clips_round_robin (used by both build_grid_manifest and
+    build_grid_word_segments) selects clips from the .mpg files, not the
+    .align files directly, so a clip needs a .mpg placeholder present to
+    be picked up at all -- matching real GRID's layout, where the two
+    always exist together.
+    """
+    _write_grid_align(align_path, rows)
+    speaker_dir = align_path.parent.parent  # align_path is <speaker_dir>/align/<clip>.align
+    clip_id = align_path.stem
+    (speaker_dir / f"{clip_id}.mpg").write_bytes(b"")
+
+
 # ---------------------------------------------------------------------------
 # Parsing helpers
 # ---------------------------------------------------------------------------
@@ -171,7 +186,7 @@ def test_select_grid_clips_round_robin_none_limit_returns_every_clip_sorted(tmp_
 
 def test_build_grid_word_segments_excludes_sil_and_sp(tmp_path):
     grid_root = tmp_path / "grid"
-    _write_grid_align(grid_root / "s1_processed" / "align" / "bbaf2n.align", [
+    _write_grid_align_with_mpg(grid_root / "s1_processed" / "align" / "bbaf2n.align", [
         (0, 25000, "sil"),
         (25000, 50000, "place"),
         (50000, 62500, "blue"),
@@ -187,7 +202,7 @@ def test_build_grid_word_segments_excludes_sil_and_sp(tmp_path):
 
 def test_build_grid_word_segments_frame_conversion_and_sample_id(tmp_path):
     grid_root = tmp_path / "grid"
-    _write_grid_align(grid_root / "s3_processed" / "align" / "clip1.align", [
+    _write_grid_align_with_mpg(grid_root / "s3_processed" / "align" / "clip1.align", [
         (25000, 50000, "lay"),
     ])
 
@@ -200,10 +215,26 @@ def test_build_grid_word_segments_frame_conversion_and_sample_id(tmp_path):
     assert row["end_frame"] == 50
 
 
+def test_build_grid_word_segments_drops_zero_length_segments_and_logs(tmp_path):
+    grid_root = tmp_path / "grid"
+    _write_grid_align_with_mpg(grid_root / "s1_processed" / "align" / "clip1.align", [
+        (25000, 50000, "bin"),  # 1 full frame -> kept
+        (50000, 50500, "b"),    # rounds to start_frame == end_frame -> dropped
+    ])
+    log_path = tmp_path / "dropped.log"
+
+    word_segments = build_grid_word_segments(grid_root, log_path=log_path)
+
+    assert list(word_segments["word"]) == ["bin"]
+    log_text = log_path.read_text()
+    assert "s1_clip1" in log_text
+    assert "'b'" in log_text
+
+
 def test_build_grid_word_segments_limit_caps_number_of_clips(tmp_path):
     grid_root = tmp_path / "grid"
-    _write_grid_align(grid_root / "s1_processed" / "align" / "clip1.align", [(0, 25000, "bin")])
-    _write_grid_align(grid_root / "s1_processed" / "align" / "clip2.align", [(0, 25000, "lay")])
+    _write_grid_align_with_mpg(grid_root / "s1_processed" / "align" / "clip1.align", [(0, 25000, "bin")])
+    _write_grid_align_with_mpg(grid_root / "s1_processed" / "align" / "clip2.align", [(0, 25000, "lay")])
 
     word_segments = build_grid_word_segments(grid_root, limit=1)
 
@@ -213,7 +244,7 @@ def test_build_grid_word_segments_limit_caps_number_of_clips(tmp_path):
 
 def test_build_grid_word_segments_writes_csv_when_requested(tmp_path):
     grid_root = tmp_path / "grid"
-    _write_grid_align(grid_root / "s1_processed" / "align" / "clip1.align", [
+    _write_grid_align_with_mpg(grid_root / "s1_processed" / "align" / "clip1.align", [
         (0, 25000, "bin"),
     ])
     output_csv = tmp_path / "manifests" / "grid_word_segments.csv"

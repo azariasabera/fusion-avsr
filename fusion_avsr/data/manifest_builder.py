@@ -422,10 +422,7 @@ def build_lrs3_manifest(
         limit: If given, select up to this many clips round-robin across
             video IDs (see ``_select_lrs3_clips_round_robin``), instead
             of walking the entire split in sorted video_id/clip_id
-            order -- a small limit still spans multiple videos rather
-            than exhausting one video's clips before ever reaching the
-            next. Useful for a quick smoke test against a handful of
-            real clips before committing to a full run.
+            order.
         clean: If True (default) and ``output_csv`` is given, drop rows
             with missing files or landmark frame-count mismatches (see
             ``clean_manifest``) before writing the CSV, so the returned
@@ -570,6 +567,7 @@ def build_grid_word_segments(
     grid_root: PathLike,
     output_csv: Optional[PathLike] = None,
     limit: Optional[int] = None,
+    log_path: Optional[PathLike] = None,
 ) -> pd.DataFrame:
     """Build the word-level segment table used by the word-recognition pretext task.
 
@@ -589,7 +587,9 @@ def build_grid_word_segments(
 
     Timestamps are converted by dividing the raw ``.align`` timestamp (in
     units of 1/25000 second) by 25000 to get seconds, then multiplying by
-    25fps to get a frame index.
+    25fps to get a frame index. Segments whose ``start_frame >=
+    end_frame`` are dropped rather than kept as a zero/negative-length
+    row.
 
     Args:
         grid_root: Path to the GRID dataset root (same as
@@ -599,6 +599,11 @@ def build_grid_word_segments(
             ``manifests/grid_word_segments.csv``).
         limit: If given, select up to this many CLIPS round-robin across
             speakers (see ``_select_grid_clips_round_robin``).
+        log_path: Optional path to an append-only log file. Dropped
+            zero/negative-length word segments are logged here. If
+            not given but ``output_csv`` is, a
+            ``<output_csv stem>_dropped_segments.log`` path next to it is
+            used instead.
 
     Returns:
         A DataFrame with columns ``sample_id``, ``word``, ``start_frame``,
@@ -614,6 +619,7 @@ def build_grid_word_segments(
 
     logger.info("Building GRID word-segment table from %s (limit=%s)", grid_root, limit)
     rows = []
+    dropped_lines = []
     for mpg_path in selected_mpg_paths:
         speaker_dir = mpg_path.parent
         speaker = speaker_dir.name.replace("_processed", "")
@@ -624,14 +630,35 @@ def build_grid_word_segments(
         for start_units, end_units, word in _parse_grid_align(align_path):
             if word in GRID_NON_WORD_TOKENS:
                 continue
+            start_frame = _align_units_to_frame(start_units)
+            end_frame = _align_units_to_frame(end_units)
+            if start_frame >= end_frame:
+                dropped_lines.append(
+                    f"{sample_id}: dropped word={word!r} "
+                    f"(start_frame={start_frame} >= end_frame={end_frame})\n"
+                )
+                continue
             rows.append({
                 "sample_id": sample_id,
                 "word": word,
-                "start_frame": _align_units_to_frame(start_units),
-                "end_frame": _align_units_to_frame(end_units),
+                "start_frame": start_frame,
+                "end_frame": end_frame,
             })
 
+    if dropped_lines:
+        if log_path is None and output_csv is not None:
+            output_csv = Path(output_csv)
+            log_path = output_csv.with_name(f"{output_csv.stem}_dropped_segments.log")
+        if log_path is not None:
+            with open(log_path, "a") as f:
+                f.writelines(dropped_lines)
+
     word_segments = pd.DataFrame(rows, columns=WORD_SEGMENT_COLUMNS)
+    if dropped_lines:
+        logger.warning(
+            "Dropped %d zero/negative-length word segment(s) (start_frame >= end_frame)",
+            len(dropped_lines),
+        )
     logger.info("Built GRID word-segment table: %d word segments", len(word_segments))
     _maybe_write_csv(word_segments, output_csv)
     return word_segments
