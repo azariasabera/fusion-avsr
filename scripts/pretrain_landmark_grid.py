@@ -60,11 +60,7 @@ def _split_indices_by_speaker(
     from a held-out speaker's clips entirely on the val side.
 
     The number of speakers held out is a FRACTION of however many unique
-    speakers are actually present (rounded), not a fixed count -- with
-    ``limit`` set (e.g. for a smoke test), round-robin clip selection
-    (see ``_select_grid_clips_round_robin`` in manifest_builder.py) can
-    mean far fewer than GRID's full 33 speakers are present, so a fixed
-    absolute count could hold out too many (or too few) of them.
+    speakers are actually present (rounded).
 
     Args:
         word_segments: The (already clip-filtered) GRID word-segment
@@ -117,6 +113,7 @@ def main(cfg: DictConfig) -> None:
     grid_manifest = load_or_build_manifest(
         MANIFEST_DIR / "grid_manifest.csv",
         build_grid_manifest,
+        force_rebuild=cfg.force_rebuild_manifest,
         grid_root=cfg.grid_root,
         landmarks_root=cfg.landmarks_root,
         audio_output_dir=cfg.audio_output_dir,
@@ -138,6 +135,7 @@ def main(cfg: DictConfig) -> None:
         pixel_mean=pixel_mean,
         pixel_std=pixel_std,
         limit=cfg.limit,
+        force_rebuild_manifests=cfg.force_rebuild_manifest,
     )
     train_indices, val_indices = _split_indices_by_speaker(full_dataset.word_segments, cfg.val_speaker_fraction, cfg.seed)
     train_dataset = Subset(full_dataset, train_indices)
