@@ -178,9 +178,10 @@ def load_or_build_manifest(
             if recorded_params != requested_params:
                 message = (
                     f"Cached manifest at {csv_path} was built with different parameters than "
-                    f"this call is requesting -- refusing to silently serve mismatched data.\n"
+                    f"this call is requesting, please compare the difference below:\n"
                     f"  recorded:  {recorded_params}\n  requested: {requested_params}\n"
-                    f"Pass force_rebuild=True, or delete {csv_path} and {params_path}, to rebuild."
+                    f"Pass force_rebuild=True (or force_rebuild_manifest=True for pretrain_landmark_grid.py), "
+                    f"or delete {csv_path} and {params_path}, to rebuild."
                 )
                 logger.error(message)
                 raise ValueError(message)

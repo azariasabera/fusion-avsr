@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import random
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -193,6 +194,7 @@ def main(cfg: DictConfig) -> None:
 
     checkpoint_dir = Path(cfg.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     best_val_accuracy = 0.0
     epochs_without_improvement = 0
     history: List[Dict[str, float]] = []
@@ -224,7 +226,7 @@ def main(cfg: DictConfig) -> None:
         if val_metrics["accuracy"] > best_val_accuracy:
             best_val_accuracy = val_metrics["accuracy"]
             epochs_without_improvement = 0
-            checkpoint_path = checkpoint_dir / "best.pth"
+            checkpoint_path = checkpoint_dir / f"best_{run_timestamp}.pth"
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
@@ -246,12 +248,12 @@ def main(cfg: DictConfig) -> None:
                 )
                 break
 
-    history_path = checkpoint_dir / "history.json"
+    history_path = checkpoint_dir / f"history_{run_timestamp}.json"
     with open(history_path, "w", encoding="utf-8") as f:
         json.dump(history, f, indent=2)
     logger.info("Wrote training history to %s", history_path)
 
-    curves_path = checkpoint_dir / "training_curves.png"
+    curves_path = checkpoint_dir / f"training_curves_{run_timestamp}.png"
     _plot_training_curves(history, curves_path)
     logger.info("Wrote training curves to %s", curves_path)
 
