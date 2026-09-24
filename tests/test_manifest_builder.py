@@ -806,3 +806,43 @@ def test_filter_grid_word_segments_drops_segment_beyond_landmark_count(tmp_path)
 
     assert len(filtered) == 0
     assert "late" in log_path.read_text()
+
+
+def _write_landmarks_with_validity(path, valid_flags) -> None:
+    """Write a landmark .pkl file with a real placeholder for True entries, None for False ones."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        pickle.dump([("real",) if valid else None for valid in valid_flags], f)
+
+
+def test_filter_grid_word_segments_drops_segment_with_no_valid_landmarks(tmp_path):
+    word_segments = pd.DataFrame([
+        {"sample_id": "s1_a", "word": "blink", "start_frame": 2, "end_frame": 5},
+    ])
+    landmark_path = tmp_path / "s1_a.pkl"
+    # Frames 2, 3, 4 (the word's range) are all None; frames elsewhere are valid.
+    _write_landmarks_with_validity(landmark_path, [True, True, False, False, False, True, True])
+    manifest = pd.DataFrame([{"sample_id": "s1_a", "landmark_path": str(landmark_path)}])
+    log_path = tmp_path / "dropped.log"
+
+    filtered = filter_grid_word_segments(word_segments, manifest, log_path=log_path)
+
+    assert len(filtered) == 0
+    assert "blink" in log_path.read_text()
+    assert "no valid face detection" in log_path.read_text()
+
+
+def test_filter_grid_word_segments_keeps_segment_with_partial_valid_landmarks(tmp_path):
+    word_segments = pd.DataFrame([
+        {"sample_id": "s1_a", "word": "bin", "start_frame": 2, "end_frame": 5},
+    ])
+    landmark_path = tmp_path / "s1_a.pkl"
+    # Frame 3 (inside the word's range) is None, but frames 2 and 4 are valid --
+    # _fill_missing_landmarks can forward/back-fill a partial gap like this.
+    _write_landmarks_with_validity(landmark_path, [True, True, True, False, True, True, True])
+    manifest = pd.DataFrame([{"sample_id": "s1_a", "landmark_path": str(landmark_path)}])
+
+    filtered = filter_grid_word_segments(word_segments, manifest)
+
+    assert len(filtered) == 1
+    assert filtered.iloc[0]["word"] == "bin"

@@ -970,20 +970,70 @@ def compute_landmark_frame_counts(
     return counts
 
 
+def _drop_word_segments_without_valid_landmarks(
+    word_segments: pd.DataFrame,
+    manifest: pd.DataFrame,
+    log_path: Optional[PathLike] = None,
+) -> pd.DataFrame:
+    """Drop word segments whose ``[start_frame, end_frame)`` has zero valid (non-``None``) landmarks.
+
+    Args:
+        word_segments: GRID word-segment table, already clamped to real
+            landmark length (see ``filter_grid_word_segments``).
+        manifest: Manifest with ``sample_id`` and ``landmark_path``
+            columns.
+        log_path: Optional path to an append-only log file for dropped
+            rows.
+
+    Returns:
+        A copy of ``word_segments`` with no-valid-landmark segments
+        removed, index reset.
+    """
+    landmark_path_by_sample_id = dict(zip(manifest["sample_id"], manifest["landmark_path"]))
+    landmarks_cache: Dict[str, list] = {}
+
+    def _has_valid_landmark(row) -> bool:
+        sample_id = row.sample_id
+        if sample_id not in landmarks_cache:
+            with open(landmark_path_by_sample_id[sample_id], "rb") as f:
+                landmarks_cache[sample_id] = pickle.load(f)
+        segment = landmarks_cache[sample_id][row.start_frame:row.end_frame]
+        return any(landmark is not None for landmark in segment)
+
+    keep_mask = pd.Series(
+        [_has_valid_landmark(row) for row in word_segments.itertuples()], index=word_segments.index
+    )
+
+    if (~keep_mask).any():
+        dropped = word_segments[~keep_mask]
+        dropped_lines = [
+            f"{row.sample_id}: dropped word={row.word!r} "
+            f"(no valid face detection in [{row.start_frame}, {row.end_frame}))\n"
+            for row in dropped.itertuples()
+        ]
+        logger.warning("Dropped %d word segment(s) with no valid landmark detections", len(dropped_lines))
+        if log_path is not None:
+            with open(log_path, "a") as f:
+                f.writelines(dropped_lines)
+
+    return word_segments[keep_mask].reset_index(drop=True)
+
+
 def filter_grid_word_segments(
     word_segments: pd.DataFrame,
     manifest: pd.DataFrame,
     log_path: Optional[PathLike] = None,
 ) -> pd.DataFrame:
-    """Keep word segments whose parent clips are present in a manifest, 
-    clamped to real landmark length.
+    """Keep word segments whose parent clips are present in a manifest, clamped to real landmark data.
 
-    Two things, both scoped to what ``manifest`` (not ``word_segments``)
+    Three things, all scoped to what ``manifest`` (not ``word_segments``)
     knows about a clip: (1) a semi-join on ``sample_id``, dropping
     segments whose clip isn't in ``manifest`` (e.g. dropped by
     ``clean_manifest``); (2) clamping each remaining segment's
     ``end_frame`` to its parent clip's actual landmark length (see
-    ``compute_landmark_frame_counts``) via ``_clamp_word_segments``.
+    ``compute_landmark_frame_counts``) via ``_clamp_word_segments``; (3)
+    dropping any segment whose (now-clamped) frame range has zero valid
+    (non-``None``) landmark detections at all.
 
     Args:
         word_segments: GRID word-segment table produced by
@@ -993,15 +1043,17 @@ def filter_grid_word_segments(
             keep, with a ``landmark_path`` column. This should normally
             be a cleaned GRID manifest.
         log_path: Optional path to an append-only log file. Segments
-            dropped by the landmark-length clamp (and clips whose
-            landmark file fails to load) are logged here.
+            dropped by either the landmark-length clamp or the
+            valid-detection check (and clips whose landmark file fails
+            to load) are logged here.
 
     Returns:
         A copy of ``word_segments`` containing only rows whose
-        ``sample_id`` occurs in ``manifest`` and whose
-        ``[start_frame, end_frame)`` still fits within the parent clip's
-        real landmark count, with the index reset. The input DataFrames
-        are not modified.
+        ``sample_id`` occurs in ``manifest``, whose
+        ``[start_frame, end_frame)`` fits within the parent clip's real
+        landmark count, and whose frame range has at least one valid
+        face detection, with the index reset. The input DataFrames are
+        not modified.
     """
     valid_ids = set(manifest["sample_id"])
     kept = word_segments[word_segments["sample_id"].isin(valid_ids)].reset_index(drop=True)
@@ -1010,4 +1062,8 @@ def filter_grid_word_segments(
 
     clip_manifest = manifest[manifest["sample_id"].isin(set(kept["sample_id"]))]
     landmark_frame_counts = compute_landmark_frame_counts(clip_manifest, log_path=log_path)
-    return _clamp_word_segments(kept, landmark_frame_counts, reason="landmark_frame_count", log_path=log_path)
+    kept = _clamp_word_segments(kept, landmark_frame_counts, reason="landmark_frame_count", log_path=log_path)
+    if kept.empty:
+        return kept
+
+    return _drop_word_segments_without_valid_landmarks(kept, clip_manifest, log_path=log_path)
