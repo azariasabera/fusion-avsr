@@ -31,14 +31,14 @@ def compute_dataset_pixel_stats(
     video_paths: Sequence[PathLike],
     frames_per_video: int = 10,
     seed: Optional[int] = DEFAULT_SEED,
+    _open_decoder=None,
 ) -> Tuple[float, float]:
     """Compute the (mean, std) of grayscale pixel values over a set of videos.
 
     Streams a fixed number of randomly sampled frames per video (rather
-    than every frame of every video) so this stays cheap even over tens
-    of thousands of clips, using Welford's online algorithm so the whole
-    sample never needs to be held in memory at once.
-
+    than every frame of every video). Accumulates per-frame sum and 
+    sum-of-squares with vectorized numpy reductions.
+    
     Args:
         video_paths: Paths to every training-set video to include in the
             statistics (conventionally, every clip in the training
@@ -49,22 +49,26 @@ def compute_dataset_pixel_stats(
         seed: Random seed controlling which frames are sampled from each
             video. Defaults to ``DEFAULT_SEED`` (42); pass ``None`` for a
             genuinely unseeded (non-reproducible) run.
+        _open_decoder: Lets this function be unit tested with a fake decoder, 
+            without needing torchcodec installed.
 
     Returns:
         A ``(mean, std)`` tuple of Python floats, over the ``[0, 255]``
         grayscale pixel value range.
     """
-    from torchcodec.decoders import VideoDecoder
+    if _open_decoder is None:
+        from torchcodec.decoders import VideoDecoder
+        _open_decoder = lambda video_path: VideoDecoder(str(video_path), dimension_order="NHWC")
 
     rng = random.Random(seed)
     luma_weights = np.array([0.299, 0.587, 0.114], dtype=np.float64)
 
     count = 0
-    mean = 0.0
-    m2 = 0.0  # sum of squared differences from the running mean (Welford).
+    pixel_sum = 0.0
+    pixel_sum_sq = 0.0
 
     for video_path in video_paths:
-        decoder = VideoDecoder(str(video_path), dimension_order="NHWC")
+        decoder = _open_decoder(video_path)
         num_frames = len(decoder)
         if num_frames == 0:
             continue
@@ -77,22 +81,22 @@ def compute_dataset_pixel_stats(
                 continue
             frame = frame.numpy().astype(np.float64)
             if frame.ndim == 3:
-                frame = frame @ luma_weights
-            for pixel_value in frame.ravel():
-                count += 1
-                delta = pixel_value - mean
-                mean += delta / count
-                m2 += delta * (pixel_value - mean)
+                frame = frame @ luma_weights # Y = 0.299*R + 0.587*G + 0.114*B
+
+            count += frame.size
+            pixel_sum += frame.sum()
+            pixel_sum_sq += np.square(frame).sum()
 
     if count == 0:
         message = "No frames sampled across the given video_paths -- cannot compute pixel stats."
         logger.error(message)
         raise ValueError(message)
 
-    variance = m2 / count
+    mean = pixel_sum / count
+    variance = (pixel_sum_sq / count) - (mean ** 2)
     std = float(np.sqrt(variance))
     logger.info(
-        "Computed pixel stats over %d sampled frames from %d videos: mean=%.4f std=%.4f",
+        "Computed pixel stats over %d sampled pixels from %d videos: mean=%.4f std=%.4f",
         count, len(video_paths), mean, std,
     )
     return float(mean), std
