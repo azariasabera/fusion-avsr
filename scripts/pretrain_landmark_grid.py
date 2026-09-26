@@ -30,7 +30,7 @@ import hydra
 import pandas as pd
 import torch
 from omegaconf import DictConfig
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
@@ -49,12 +49,12 @@ from fusion_avsr.utils.logging import get_logger  # noqa: E402
 logger = get_logger(__name__)
 
 
-def _split_indices_by_speaker(
-    word_segments: pd.DataFrame,
+def _split_manifest_by_speaker(
+    manifest: pd.DataFrame,
     val_speaker_fraction: float,
     seed: int,
-) -> Tuple[List[int], List[int]]:
-    """Split word-segment row indices into train/val, holding out whole SPEAKERS.
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Split a GRID per-clip manifest into train/val, holding out whole SPEAKERS.
 
     ``sample_id`` is ``<speaker_id>_<clip_id>``. Splitting at the clip
     level would still let val share a speaker's voice/appearance with
@@ -65,22 +65,22 @@ def _split_indices_by_speaker(
     speakers are actually present (rounded).
 
     Args:
-        word_segments: The (already clip-filtered) GRID word-segment
-            table.
+        manifest: The per-clip GRID manifest (``build_grid_manifest``'s
+            output).
         val_speaker_fraction: Fraction of unique speakers to hold out for
             validation (e.g. 0.1 -> ~10%, rounded).
         seed: Random seed controlling which speakers are held out.
 
     Returns:
-        A tuple ``(train_indices, val_indices)`` of row indices into
-        ``word_segments``.
+        A tuple ``(train_manifest, val_manifest)``, each a row subset of
+        ``manifest``.
 
     Raises:
         ValueError: If fewer than 2 unique speakers remain after
             filtering -- there is nothing meaningful to split (should
             only trigger on a pathologically small ``limit``, e.g. 1).
     """
-    speaker_ids = word_segments["sample_id"].str.split("_", n=1).str[0]
+    speaker_ids = manifest["sample_id"].str.split("_", n=1).str[0]
     unique_speakers = sorted(speaker_ids.unique())
 
     if len(unique_speakers) < 2:
@@ -99,9 +99,9 @@ def _split_indices_by_speaker(
     val_speakers = set(unique_speakers[:num_val_speakers])
 
     is_val = speaker_ids.isin(val_speakers)
-    val_indices = word_segments.index[is_val].tolist()
-    train_indices = word_segments.index[~is_val].tolist()
-    return train_indices, val_indices
+    train_manifest = manifest[~is_val].reset_index(drop=True)
+    val_manifest = manifest[is_val].reset_index(drop=True)
+    return train_manifest, val_manifest
 
 
 def _plot_training_curves(history: List[Dict[str, float]], output_path: Path) -> None:
@@ -156,25 +156,33 @@ def main(cfg: DictConfig) -> None:
         limit=cfg.limit,
     )
 
+    train_manifest, val_manifest = _split_manifest_by_speaker(grid_manifest, cfg.val_speaker_fraction, cfg.seed)
+
     pixel_mean, pixel_std = load_or_compute_pixel_stats(
         MANIFEST_DIR / "grid_pixel_stats.json",
-        video_paths=grid_manifest["video_path"].tolist(),
+        video_paths=train_manifest["video_path"].tolist(),
         frames_per_video=cfg.pixel_stats_frames_per_video,
         seed=cfg.seed,
     )
-    logger.info("Using pixel stats: mean=%.4f std=%.4f", pixel_mean, pixel_std)
+    logger.info("Using pixel stats (train speakers only): mean=%.4f std=%.4f", pixel_mean, pixel_std)
 
-    full_dataset = GridWordSegmentDataset(
+    train_dataset = GridWordSegmentDataset(
         grid_root=cfg.grid_root,
-        grid_manifest=grid_manifest,
+        grid_manifest=train_manifest,
         pixel_mean=pixel_mean,
         pixel_std=pixel_std,
         limit=cfg.limit,
         force_rebuild_manifests=cfg.force_rebuild_manifest,
     )
-    train_indices, val_indices = _split_indices_by_speaker(full_dataset.word_segments, cfg.val_speaker_fraction, cfg.seed)
-    train_dataset = Subset(full_dataset, train_indices)
-    val_dataset = Subset(full_dataset, val_indices)
+    val_dataset = GridWordSegmentDataset(
+        grid_root=cfg.grid_root,
+        grid_manifest=val_manifest,
+        pixel_mean=pixel_mean,
+        pixel_std=pixel_std,
+        vocabulary=train_dataset.vocabulary,
+        limit=cfg.limit,
+        force_rebuild_manifests=cfg.force_rebuild_manifest,
+    )
     logger.info("Train: %d word segments, Val: %d word segments", len(train_dataset), len(val_dataset))
 
     train_loader = DataLoader(
@@ -187,7 +195,7 @@ def main(cfg: DictConfig) -> None:
         num_workers=cfg.num_workers, collate_fn=collate_word_segments,
     )
 
-    model = GridWordRecognitionModel(num_classes=len(full_dataset.vocabulary)).to(device)
+    model = GridWordRecognitionModel(num_classes=len(train_dataset.vocabulary)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3)
 
@@ -229,7 +237,7 @@ def main(cfg: DictConfig) -> None:
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
-                    "vocabulary": full_dataset.vocabulary,
+                    "vocabulary": train_dataset.vocabulary,
                     "pixel_mean": pixel_mean,
                     "pixel_std": pixel_std,
                     "val_accuracy": best_val_accuracy,
