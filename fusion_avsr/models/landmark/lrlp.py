@@ -50,6 +50,9 @@ assert NUM_LRLPS == 38, f"expected 38 LRLPs, got {NUM_LRLPS}"
 # protrudes -- is the point conventionally referred to as "the nose tip".
 NOSE_TIP_INDEX = 30
 
+# For grayscale conversion
+LUMA_WEIGHTS = [0.299, 0.587, 0.114]
+
 
 def _fill_missing_landmarks(
     landmarks: Sequence[Optional[np.ndarray]],
@@ -193,7 +196,7 @@ def extract_lrlp_sequence(
     if video_frames.ndim == 4:
         # Standard luma weighting (ITU-R BT.601), matching
         # torchvision.transforms.Grayscale's default behavior.
-        weights = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+        weights = np.array(LUMA_WEIGHTS, dtype=np.float32)
         frames_gray = (video_frames.astype(np.float32) @ weights).astype(video_frames.dtype)
     else:
         frames_gray = video_frames
