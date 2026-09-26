@@ -166,8 +166,7 @@ def main(cfg: DictConfig) -> None:
 
     full_dataset = GridWordSegmentDataset(
         grid_root=cfg.grid_root,
-        landmarks_root=cfg.landmarks_root,
-        audio_output_dir=cfg.audio_output_dir,
+        grid_manifest=grid_manifest,
         pixel_mean=pixel_mean,
         pixel_std=pixel_std,
         limit=cfg.limit,

@@ -20,7 +20,6 @@ import torch
 from torch.utils.data import Dataset
 
 from fusion_avsr.data.manifest_builder import (
-    build_grid_manifest,
     build_grid_word_segments,
     filter_grid_word_segments,
     load_or_build_manifest,
@@ -60,8 +59,7 @@ class GridWordSegmentDataset(Dataset):
     def __init__(
         self,
         grid_root: PathLike,
-        landmarks_root: PathLike,
-        audio_output_dir: PathLike,
+        grid_manifest: pd.DataFrame,
         pixel_mean: float,
         pixel_std: float,
         manifest_dir: PathLike = MANIFEST_DIR,
@@ -69,40 +67,28 @@ class GridWordSegmentDataset(Dataset):
         limit: Optional[int] = None,
         force_rebuild_manifests: bool = False,
     ) -> None:
-        """Build the dataset, loading/caching GRID's manifests as needed.
+        """Build the dataset, loading/caching GRID's word-segment table as needed.
 
         Args:
-            grid_root: Path to the GRID dataset root.
-            landmarks_root: Path to GRID's landmark ``.pkl`` files.
-            audio_output_dir: Path ``scripts/extract_audio.sh`` wrote
-                GRID's extracted ``.wav`` files to (needed by
-                ``build_grid_manifest``, even though audio itself is
-                unused by this pretext task).
+            grid_root: Path to the GRID dataset root (needed to build
+                the word-segment table itself, from ``.align`` files).
+            grid_manifest: The already-built per-clip GRID manifest.
             pixel_mean: Dataset-level grayscale pixel mean (see
                 ``fusion_avsr.models.landmark.normalization``).
             pixel_std: Dataset-level grayscale pixel std.
-            manifest_dir: Directory manifests are cached under. Defaults
-                to ``fusion_avsr.data.paths.MANIFEST_DIR``.
+            manifest_dir: Directory the word-segment table is cached
+                under. Defaults to ``fusion_avsr.data.paths.MANIFEST_DIR``.
             vocabulary: Word -> class-index mapping. If ``None``
                 (default), built fresh from this dataset's own word
                 segments via ``build_word_vocabulary`` -- pass an
                 explicit vocabulary (e.g. from a train split) when
                 constructing a val/test split, so class indices line up.
-            limit: Forwarded to the manifest builders, for fast smoke
-                testing against a handful of clips.
-            force_rebuild_manifests: If True, rebuild cached manifests
-                even if they already exist on disk.
+            limit: Forwarded to ``build_grid_word_segments``, for fast
+                smoke testing against a handful of clips.
+            force_rebuild_manifests: If True, rebuild the cached
+                word-segment table even if it already exists on disk.
         """
         manifest_dir = Path(manifest_dir)
-        grid_manifest = load_or_build_manifest(
-            manifest_dir / "grid_manifest.csv",
-            build_grid_manifest,
-            force_rebuild=force_rebuild_manifests,
-            grid_root=grid_root,
-            landmarks_root=landmarks_root,
-            audio_output_dir=audio_output_dir,
-            limit=limit,
-        )
         word_segments = load_or_build_manifest(
             manifest_dir / "grid_word_segments.csv",
             build_grid_word_segments,
