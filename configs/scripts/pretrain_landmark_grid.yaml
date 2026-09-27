@@ -40,7 +40,7 @@ val_speaker_fraction: 0.1
 # Batch size, learning rate, and number of epochs for the word-
 # recognition pretext task.
 batch_size: 32
-learning_rate: 1.0e-3
+learning_rate: 2.0e-5 # Turns out 1.0e-3 was very fast that the loss was exploding
 num_epochs: 20
 num_workers: 4
 
