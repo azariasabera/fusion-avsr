@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
+from tqdm import tqdm
 
 from fusion_avsr.utils.logging import get_logger
 from fusion_avsr.utils.video import try_decode_frame
@@ -67,7 +68,7 @@ def compute_dataset_pixel_stats(
     pixel_sum = 0.0
     pixel_sum_sq = 0.0
 
-    for video_path in video_paths:
+    for video_path in tqdm(video_paths, desc="Computing pixel stats", unit="video"):
         decoder = _open_decoder(video_path)
         num_frames = len(decoder)
         if num_frames == 0:
